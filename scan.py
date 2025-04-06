@@ -2,58 +2,57 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ========================
-# Función para autorizar gspread usando credenciales desde un archivo (ruta absoluta)
-# ========================
 def authorize_gspread():
-    # Reemplaza esta ruta con la ubicación completa de tu archivo de credenciales JSON
-    credenciales_path = r"C:\Users\jhonn\OneDrive\Documents\bedspoke\key register\credenciales.json"
-    credentials = Credentials.from_service_account_file(
-        credenciales_path,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
+    """
+    Autoriza a gspread utilizando las credenciales almacenadas en st.secrets.
+    Asegúrate de haber configurado los secrets en Streamlit Cloud (o localmente en .streamlit/secrets.toml).
+    """
+    creds_dict = st.secrets["gcp_service_account"]
+    credentials = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     )
     client = gspread.authorize(credentials)
     return client
 
-# ========================
-# Función para actualizar el registro de una llave en Google Sheets
-# ========================
 def update_key_status(key_code, new_status):
+    """
+    Busca en la hoja "Key Register" la fila en la que el valor de la columna "Tag" coincide con key_code,
+    y actualiza la celda de la columna "Observation" con new_status.
+    Se asume que:
+      - La fila 2 contiene los encabezados.
+      - Los datos comienzan en la fila 3.
+    """
     try:
         client = authorize_gspread()
     except Exception as e:
         return f"Error al autorizar gspread: {e}"
     
-    # Reemplaza con el ID de tu Google Sheet (extraído de la URL)
-    spreadsheet_id = "1AEX3jKwAdO5cROqTe6k4uNv7BCy7lPOKHrGQjZA3om0"
+    # Obtener el ID del spreadsheet desde st.secrets o usar uno por defecto
+    spreadsheet_id = st.secrets["gcp_service_account"].get("spreadsheet_id", "TU_SPREADSHEET_ID")
     
     try:
-        # Abre la hoja "Key Register"
         sheet = client.open_by_key(spreadsheet_id).worksheet("Key Register")
     except Exception as e:
         return f"Error al abrir la hoja 'Key Register': {e}"
     
     try:
-        # Asumimos que la fila 2 tiene los encabezados
+        # La fila 2 es la de encabezados
         headers = sheet.row_values(2)
-        # Se obtienen los registros, indicando que la fila 2 son los encabezados
+        # Obtén todos los registros, interpretando la fila 2 como encabezados
         records = sheet.get_all_records(head=2)
     except Exception as e:
         return f"Error al obtener los datos de la hoja: {e}"
     
-    # Buscamos la columna "Tag" (índice 1-based)
+    # Buscar la columna "Tag"
     try:
-        tag_index = headers.index("Tag") + 1
+        tag_index = headers.index("Tag") + 1  # Conversión a índice 1-based
     except ValueError:
         return "No se encontró la columna 'Tag' en la hoja."
     
-    # Buscamos la fila cuyo valor en "Tag" coincide con el código ingresado.
-    # Dado que la fila 1 es el título y la 2 son los encabezados, los datos comienzan en la fila 3.
+    # Buscar la fila cuyo valor en "Tag" coincida con key_code
     row_number = None
-    for i, record in enumerate(records, start=3):
+    for i, record in enumerate(records, start=3):  # Los datos empiezan en la fila 3
         if record.get("Tag", "").strip() == key_code:
             row_number = i
             break
@@ -61,30 +60,29 @@ def update_key_status(key_code, new_status):
     if row_number is None:
         return f"No se encontró la llave con código '{key_code}'."
     
-    # Buscamos la columna "Observation"
+    # Buscar la columna "Observation"
     try:
         obs_index = headers.index("Observation") + 1
     except ValueError:
         return "No se encontró la columna 'Observation' en la hoja."
     
     try:
+        # Actualiza la celda con el nuevo valor (si new_status es vacío, la celda se dejará en blanco)
         sheet.update_cell(row_number, obs_index, new_status)
         return f"Registro actualizado correctamente en la fila {row_number}."
     except Exception as e:
         return f"Error al actualizar la celda: {e}"
 
-# ========================
-# Interfaz visual con Streamlit
-# ========================
+# INTERFAZ CON STREAMLIT
 st.title("Actualización de Llaves M")
-st.markdown("Ingrese el código de la llave y el nombre de la persona que la toma (déjelo en blanco para devolverla).")
+st.markdown("Ingresa el código de la llave y el nuevo valor para la columna **Observation** (deja en blanco si se devuelve la llave).")
 
-# Campo para ingresar o escanear el código de la llave
+# Campo para el código de la llave (por ejemplo, M001)
 key_code = st.text_input("Código de la llave (ej. M001):")
-# Campo para ingresar el nombre del usuario
-new_status = st.text_input("Nombre del usuario (déjelo en blanco si se devuelve):")
+# Campo para el nuevo estado (nombre de quien toma la llave o vacío si se devuelve)
+new_status = st.text_input("Nuevo valor para 'Observation':")
 
-if st.button("Actualizar registro"):
+if st.button("Actualizar Registro"):
     if not key_code:
         st.error("Debe ingresar el código de la llave.")
     else:
