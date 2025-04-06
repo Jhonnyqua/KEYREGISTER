@@ -2,92 +2,107 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
+# ========================
+# Function to authorize gspread using a local credentials JSON file
+# ========================
 def authorize_gspread():
-    """
-    Autoriza a gspread utilizando las credenciales almacenadas en st.secrets.
-    Asegúrate de haber configurado los secrets en Streamlit Cloud (o localmente en .streamlit/secrets.toml).
-    """
-    creds_dict = st.secrets["gcp_service_account"]
-    credentials = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    # Replace with the full path to your credentials JSON file.
+    cred_path = r"C:\Users\jhonn\OneDrive\Documents\bedspoke\key register\credenciales.json"
+    credentials = Credentials.from_service_account_file(
+        cred_path,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
     )
     client = gspread.authorize(credentials)
     return client
 
+# ========================
+# Function to update the key status in Google Sheets
+# ========================
 def update_key_status(key_code, new_status):
-    """
-    Busca en la hoja "Key Register" la fila en la que el valor de la columna "Tag" coincide con key_code,
-    y actualiza la celda de la columna "Observation" con new_status.
-    Se asume que:
-      - La fila 2 contiene los encabezados.
-      - Los datos comienzan en la fila 3.
-    """
     try:
         client = authorize_gspread()
     except Exception as e:
-        return f"Error al autorizar gspread: {e}"
+        return f"Error authorizing gspread: {e}"
     
-    # Obtener el ID del spreadsheet desde st.secrets o usar uno por defecto
-    spreadsheet_id = st.secrets["gcp_service_account"].get("spreadsheet_id", "TU_SPREADSHEET_ID")
+    # Replace with your actual spreadsheet ID (from the URL of your Google Sheet)
+    spreadsheet_id = "1AEX3jKwAdO5cROqTe6k4uNv7BCy7lPOKHrGQjZA3om0"
     
     try:
+        # Open the "Key Register" worksheet
         sheet = client.open_by_key(spreadsheet_id).worksheet("Key Register")
     except Exception as e:
-        return f"Error al abrir la hoja 'Key Register': {e}"
+        return f"Error opening the 'Key Register' sheet: {e}"
     
     try:
-        # La fila 2 es la de encabezados
+        # Assume row 2 contains headers, and data starts at row 3
         headers = sheet.row_values(2)
-        # Obtén todos los registros, interpretando la fila 2 como encabezados
         records = sheet.get_all_records(head=2)
     except Exception as e:
-        return f"Error al obtener los datos de la hoja: {e}"
+        return f"Error retrieving data from the sheet: {e}"
     
-    # Buscar la columna "Tag"
+    # Find the column "Tag" (1-based index)
     try:
-        tag_index = headers.index("Tag") + 1  # Conversión a índice 1-based
+        tag_index = headers.index("Tag") + 1
     except ValueError:
-        return "No se encontró la columna 'Tag' en la hoja."
+        return "Column 'Tag' not found."
     
-    # Buscar la fila cuyo valor en "Tag" coincida con key_code
+    # Search for the row where the "Tag" value matches key_code (data starts on row 3)
     row_number = None
-    for i, record in enumerate(records, start=3):  # Los datos empiezan en la fila 3
+    for i, record in enumerate(records, start=3):
         if record.get("Tag", "").strip() == key_code:
             row_number = i
             break
 
     if row_number is None:
-        return f"No se encontró la llave con código '{key_code}'."
+        return f"No key found with code '{key_code}'."
     
-    # Buscar la columna "Observation"
+    # Find the column "Observation"
     try:
         obs_index = headers.index("Observation") + 1
     except ValueError:
-        return "No se encontró la columna 'Observation' en la hoja."
+        return "Column 'Observation' not found."
     
     try:
-        # Actualiza la celda con el nuevo valor (si new_status es vacío, la celda se dejará en blanco)
+        # Update the cell: if new_status is empty, the cell will be set to blank (indicating a returned key)
         sheet.update_cell(row_number, obs_index, new_status)
-        return f"Registro actualizado correctamente en la fila {row_number}."
+        return f"Record updated successfully at row {row_number}."
     except Exception as e:
-        return f"Error al actualizar la celda: {e}"
+        return f"Error updating the cell: {e}"
 
-# INTERFAZ CON STREAMLIT
-st.title("Actualización de Llaves M")
-st.markdown("Ingresa el código de la llave y el nuevo valor para la columna **Observation** (deja en blanco si se devuelve la llave).")
+# ========================
+# Streamlit User Interface
+# ========================
+st.title("Key Update System")
+st.markdown("Enter the key code and select who is assigned to it. If the key is returned, choose 'Returned' to clear the assignment.")
 
-# Campo para el código de la llave (por ejemplo, M001)
-key_code = st.text_input("Código de la llave (ej. M001):")
-# Campo para el nuevo estado (nombre de quien toma la llave o vacío si se devuelve)
-new_status = st.text_input("Nuevo valor para 'Observation':")
+# Input for the key code (e.g., M001)
+key_code = st.text_input("Key Code (e.g., M001):")
 
-if st.button("Actualizar Registro"):
+# Define the list of names and options
+names = ["ALLIAHN", "CAMILO", "CATALINA", "CONTRACTOR", "GONZALO", "JHONNY", "LUIS", "POL", "STELLA", "Returned"]
+sorted_names = sorted(names)  # Sorted alphabetically
+
+# Create a select box for assignment
+assigned_option = st.selectbox("Assigned To:", sorted_names)
+
+# If CONTRACTOR is selected, provide an additional text input for the contractor's name
+if assigned_option == "CONTRACTOR":
+    contractor_name = st.text_input("Enter contractor's name:")
+    final_assigned = contractor_name.strip() if contractor_name.strip() else "CONTRACTOR"
+elif assigned_option == "Returned":
+    final_assigned = ""  # Empty string indicates the key is returned
+else:
+    final_assigned = assigned_option
+
+if st.button("Update Key Record"):
     if not key_code:
-        st.error("Debe ingresar el código de la llave.")
+        st.error("Please enter the key code.")
     else:
-        result = update_key_status(key_code, new_status)
-        if "Error" in result or "No se encontró" in result:
+        result = update_key_status(key_code, final_assigned)
+        if "Error" in result or "No key found" in result:
             st.error(result)
         else:
             st.success(result)
