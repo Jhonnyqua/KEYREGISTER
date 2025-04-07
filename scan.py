@@ -5,12 +5,12 @@ import re
 from google.oauth2.service_account import Credentials
 
 # ===========================================
-# Authorization using st.secrets (no file local)
+# Authorization using st.secrets (no local file)
 # ===========================================
 def authorize_gspread():
     """
     Authorizes gspread using credentials stored in st.secrets.
-    Ensure your Streamlit Cloud secrets have a section [gcp_service_account].
+    Make sure you have configured the secrets in Streamlit Cloud.
     """
     creds_dict = st.secrets["gcp_service_account"]
     credentials = Credentials.from_service_account_info(
@@ -22,10 +22,13 @@ def authorize_gspread():
     return client
 
 # ===========================================
-# Functions for processing the data
+# Functions for processing data (simplification, merging, etc.)
 # ===========================================
 def simplify_address_15chars(address):
-    """ Returns 15 characters starting from the first digit, after cleaning the text """
+    """
+    Returns 15 characters starting from the first digit,
+    after cleaning the text (removes special characters, lowercases, and trims spaces).
+    """
     address = address.strip()
     match = re.search(r'\d', address)
     if match:
@@ -37,15 +40,24 @@ def simplify_address_15chars(address):
     return simplified
 
 def simplify_address_basic(address):
-    """ Basic cleaning: remove extra spaces and special characters, lower-case """
+    """
+    Basic cleaning: remove extra spaces and special characters, lower-case.
+    """
     address = address.strip()
     simplified = re.sub(r'[^0-9a-zA-Z\s]', '', address).lower().strip()
     return simplified
 
 def process_files(igms_csv_file, apply_15chars, order_by_cleaner):
     """
-    Processes the IGMS CSV file and merges it with the available keys in Google Sheets.
-    Returns a sorted DataFrame (with columns renamed in English) and a CSV in bytes.
+    Processes the IGMS CSV file and merges it with available keys from Google Sheets.
+    Returns a sorted DataFrame (with columns renamed in English) and the CSV bytes.
+    
+    Note: This function assumes that:
+      - In the Google Sheet "Key Register":
+          Row 1: Title.
+          Row 2: Headers (including "Tag" and "Observation").
+          Row 3+: Data.
+      - The CSV has a column "Property Nickname".
     """
     try:
         client = authorize_gspread()
@@ -56,13 +68,12 @@ def process_files(igms_csv_file, apply_15chars, order_by_cleaner):
         return None, None, "", f"Error accessing the sheet: {e}"
 
     try:
-        # Row 1: Title, Row 2: Headers, Data starts at row 3.
         headers = sheet.row_values(2)
         records = sheet.get_all_records(head=2)
     except Exception as e:
         return None, None, "", f"Error retrieving data from the sheet: {e}"
     
-    # Create DataFrame from keys and filter for available keys (Observation empty)
+    # Build DataFrame of keys from row 2 (headers) and rows 3+ (data)
     df_keys = pd.DataFrame(data[2:], columns=headers)
     df_keys = df_keys.drop(columns='', errors='ignore')
     df_keys_available = df_keys[(df_keys["Observation"].isna()) | (df_keys["Observation"].str.strip() == "")]
@@ -72,23 +83,15 @@ def process_files(igms_csv_file, apply_15chars, order_by_cleaner):
     except Exception as e:
         return None, None, "", f"Error reading the CSV: {e}"
     
-    # Create "Simplified Address" column
+    # Create "Simplified Address" column in both DataFrames
     if apply_15chars:
-        df_igms["Simplified Address"] = df_igms["Property Nickname"].apply(
-            lambda x: simplify_address_15chars(x.split('-')[0])
-        )
-        df_keys_available["Simplified Address"] = df_keys_available["Property Address"].apply(
-            lambda x: simplify_address_15chars(x)
-        )
+        df_igms["Simplified Address"] = df_igms["Property Nickname"].apply(lambda x: simplify_address_15chars(x.split('-')[0]))
+        df_keys_available["Simplified Address"] = df_keys_available["Property Address"].apply(lambda x: simplify_address_15chars(x))
     else:
-        df_igms["Simplified Address"] = df_igms["Property Nickname"].apply(
-            lambda x: simplify_address_basic(x.split('-')[0])
-        )
-        df_keys_available["Simplified Address"] = df_keys_available["Property Address"].apply(
-            lambda x: simplify_address_basic(x)
-        )
+        df_igms["Simplified Address"] = df_igms["Property Nickname"].apply(lambda x: simplify_address_basic(x.split('-')[0]))
+        df_keys_available["Simplified Address"] = df_keys_available["Property Address"].apply(lambda x: simplify_address_basic(x))
     
-    # Merge IGMS CSV and available keys
+    # Merge the IGMS CSV with available keys using the "Simplified Address"
     df_merged = pd.merge(
         df_igms,
         df_keys_available,
@@ -97,23 +100,24 @@ def process_files(igms_csv_file, apply_15chars, order_by_cleaner):
         suffixes=('_IGMS', '_Key')
     )
     
-    # Create column "M_Key": assign the key (from column "Tag") if it starts with "M"
+    # Create "M_Key": assign the key (from column "Tag") if it starts with "M"
     df_merged["M_Key"] = df_merged.apply(
         lambda row: row["Tag"] if pd.notna(row["Tag"]) and row["Tag"].strip().startswith("M") else "",
         axis=1
     )
     
     # Select columns of interest
-    df_result = df_merged[[ 
-        "Property Nickname",  # From IGMS
-        "Cleaner",            # From IGMS (could be empty)
-        "M_Key",              # Key code
-        "Simplified Address"  # Reference
-    ]]
+    df_result = df_merged[[ "Property Nickname", "Cleaner", "M_Key", "Simplified Address" ]]
     df_result["Cleaner"] = df_result["Cleaner"].fillna("")
     
-    sort_column = "Cleaner" if order_by_cleaner else "Property Nickname"
-    df_result_sorted = df_result.sort_values(by=sort_column, na_position="first")
+    # For the CSV report, we want to sort by the first letter of "Property Nickname" (ignoring initial numbers).
+    # We'll create a sort key extracting the first alphabetical letter.
+    df_result_sorted = df_result.copy()
+    df_result_sorted["SortKey"] = df_result_sorted["Property Nickname"].str.extract(r'([A-Za-z])', expand=False).fillna('')
+    df_result_sorted = df_result_sorted.sort_values(by="SortKey", na_position="first")
+    df_result_sorted = df_result_sorted.drop(columns=["SortKey"])
+    
+    # Finally, rename columns to English for the report
     df_result_sorted = df_result_sorted.rename(columns={
         "Property Nickname": "Property",
         "Cleaner": "Assigned To",
@@ -128,7 +132,7 @@ def process_files(igms_csv_file, apply_15chars, order_by_cleaner):
 def search_key_status(key_code):
     """
     Searches for a key in the "Key Register" sheet by matching the "Tag" column.
-    Returns the record as a dictionary if found.
+    Returns a dictionary with the record if found.
     """
     try:
         client = authorize_gspread()
@@ -152,11 +156,6 @@ def search_key_status(key_code):
     if row_number is None:
         return f"No key found with code '{key_code}'.", None
     try:
-        obs_index = headers.index("Observation") + 1
-    except ValueError:
-        return "Column 'Observation' not found.", None
-    try:
-        # Read the entire row and create a dictionary
         row_values = sheet.row_values(row_number)
         record_dict = dict(zip(headers, row_values))
         return None, record_dict
@@ -165,8 +164,8 @@ def search_key_status(key_code):
 
 def generate_grouped_report(df_result_sorted):
     """
-    Groups the final DataFrame by Property and concatenates all available Key Codes
-    in a single cell, ordered by Assigned To and Property. Generates an attractive Excel report.
+    Groups the final DataFrame by Property and concatenates all available Key Codes in a single cell,
+    ordered by Assigned To and Property. An attractive Excel report is generated.
     """
     df_grouped = df_result_sorted.groupby("Property", as_index=False).agg({
         "Assigned To": "first",
@@ -180,6 +179,7 @@ def generate_grouped_report(df_result_sorted):
         df_grouped.to_excel(writer, sheet_name="Report", index=False)
         workbook = writer.book
         worksheet = writer.sheets["Report"]
+        
         header_format = workbook.add_format({
             'bold': True,
             'bg_color': '#4F81BD',
@@ -190,6 +190,7 @@ def generate_grouped_report(df_result_sorted):
         })
         for col_num, value in enumerate(df_grouped.columns.values):
             worksheet.write(0, col_num, value, header_format)
+        
         cell_format = workbook.add_format({
             'border': 1,
             'align': 'left',
@@ -209,20 +210,18 @@ def generate_grouped_report(df_result_sorted):
 # ===========================================
 st.title("Key Management System")
 
-# Create three tabs: Update Key, Search Key, Grouped Report
 tabs = st.tabs(["Update Key Status", "Search Key", "Grouped Report"])
 
-# -------------------------------------------
+# ---------------------------
 # Tab 1: Update Key Status
-# -------------------------------------------
+# ---------------------------
 with tabs[0]:
     st.header("Update Key Status")
     key_code_input = st.text_input("Key Code (e.g., M001):", key="update_key")
     
-    # Assignment options with 'Returned' as the first option
+    # Assignment options: "Returned" is first, then names in alphabetical order.
     names = ["Returned", "ALLIAHN", "CAMILO", "CATALINA", "CONTRACTOR", "GONZALO", "JHONNY", "LUIS", "POL", "STELLA"]
-    # The list is sorted alphabetically except "Returned" remains first.
-    others = sorted([name for name in names if name not in ["Returned"]])
+    others = sorted([name for name in names if name != "Returned"])
     options = ["Returned"] + others
     assigned_option = st.selectbox("Assigned To:", options, index=0, key="update_assigned")
     
@@ -233,7 +232,7 @@ with tabs[0]:
         final_assigned = ""
     else:
         final_assigned = assigned_option
-
+    
     if st.button("Update Record", key="update_button"):
         if not key_code_input:
             st.error("Please enter the key code.")
@@ -244,31 +243,28 @@ with tabs[0]:
             else:
                 st.success(result)
 
-# -------------------------------------------
+# ---------------------------
 # Tab 2: Search Key
-# -------------------------------------------
+# ---------------------------
 with tabs[1]:
     st.header("Search Key")
     search_code = st.text_input("Enter key code to search (e.g., M001):", key="search_key")
     if st.button("Search", key="search_button"):
         if not search_code:
-            st.error("Please enter the key code to search.")
+            st.error("Please enter a key code to search.")
         else:
             error_msg, record = search_key_status(search_code.strip())
             if error_msg:
                 st.error(error_msg)
             else:
                 st.success("Record found:")
-                st.write(record)
+                st.json(record)
 
-# -------------------------------------------
+# ---------------------------
 # Tab 3: Grouped Report
-# -------------------------------------------
+# ---------------------------
 with tabs[2]:
     st.header("Grouped Report")
-    # Aquí se asume que ya has procesado los datos mediante process_files
-    # y que el DataFrame final está disponible. Por ejemplo, podemos permitir al usuario
-    # cargar el CSV IGMS para generar el reporte.
     csv_file = st.file_uploader("Upload IGMS CSV file for report generation", type=["csv"], key="report_csv")
     apply_15chars = st.checkbox("Apply 15 characters from the first digit", value=True, key="report_apply")
     order_option = st.radio("Order by:", ("Cleaner", "Property Nickname"), key="report_order")
