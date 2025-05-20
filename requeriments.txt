@@ -1,0 +1,8 @@
+streamlit
+gspread
+google-auth
+pandas
+pillow
+pyzbar
+opencv-python-headless
+XlsxWriter
