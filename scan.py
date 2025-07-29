@@ -4,7 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 
-# --- CONFIGURE YOUR SHEET NAME & SECRETS KEY ---
+# ── CONFIG ─────────────────────────────────────────────────────────────────────
 SPREADSHEET_ID = st.secrets["gcp_service_account"]["spreadsheet_id"]
 WORKSHEET_NAME = "Key Register"
 
@@ -12,40 +12,34 @@ def get_gspread_client():
     creds_dict = st.secrets["gcp_service_account"]
     creds = Credentials.from_service_account_info(
         creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive"]
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
     )
     return gspread.authorize(creds)
 
-def update_key_status(tag_code: str, assignee: str, return_date: str|None):
+def update_key_status(tag_code: str, assignee: str, return_date: str|None) -> str:
     """
-    Finds the row where Tag == tag_code and writes in the Observation column:
-      - blank if assignee == "Returned"
-      - f"{assignee} @ {ISO timestamp}"   if Owner/Guest/Contractor/name
-      - if return_date provided, append " – return by YYYY-MM-DD"
+    Updates the 'Observation' cell for the row whose 'Tag' equals tag_code.
+    - If assignee == "Returned", leaves Observation blank.
+    - Otherwise writes "ASSIGNEE @ UTC_ISO_TIMESTAMP" plus optional "– return by YYYY‑MM‑DD".
     """
     client = get_gspread_client()
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
-    headers = sheet.row_values(2)
-    records = sheet.get_all_records(head=2)
 
+    headers = sheet.row_values(2)
     try:
         tag_col = headers.index("Tag") + 1
         obs_col = headers.index("Observation") + 1
     except ValueError as e:
-        return f"❌ Missing column in sheet: {e}"
+        return f"❌ Missing column: {e}"
 
-    # find matching row
-    row_num = None
-    for idx, rec in enumerate(records, start=3):
-        if str(rec.get("Tag","")).strip() == tag_code:
-            row_num = idx
-            break
-
-    if not row_num:
+    records = sheet.get_all_records(head=2)
+    row_num = next((i+3 for i, r in enumerate(records) if str(r.get("Tag","")).strip() == tag_code), None)
+    if row_num is None:
         return f"❌ Tag “{tag_code}” not found."
 
-    # build observation text
     if assignee == "Returned":
         obs_text = ""
     else:
@@ -54,66 +48,37 @@ def update_key_status(tag_code: str, assignee: str, return_date: str|None):
         if return_date:
             obs_text += f" – return by {return_date}"
 
-    # perform update
     sheet.update_cell(row_num, obs_col, obs_text)
     return f"✅ Record updated on row {row_num}."
 
-# --- UI ---
+# ── UI ───────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Key Register", layout="centered")
 st.title("🔑 Key Register Scanner")
-st.markdown("""
-Scan a tag with your scanner (or type manually), choose who holds it,
-and click **Update Record**.  
-""")
+st.markdown(
+    "Scan a tag with your scanner (or type), pick who holds it, optionally select a return date, "
+    "and click **Update Record**."
+)
 
-with st.form("key_form", clear_on_submit=False):
-    tag_input = st.text_input(
-        "Tag Code",
-        placeholder="e.g. M001",
-        key="tag_input"
-    )
+with st.form("key_form", clear_on_submit=True):
+    tag_code = st.text_input("Tag Code", placeholder="e.g. M001")
 
-    options = [
-        "Returned",       # always first
-        "Owner",
-        "Guest",
-        "Contractor",
-        "ALLIAHN",
-        "CAMILO",
-        "CATALINA",
-        "GONZALO",
-        "JHONNY",
-        "LUIS",
-        "POL",
-        "STELLA"
-    ]
     assignee = st.selectbox(
         "Assign to:",
-        options,
-        index=0,
-        key="assignee_select"
+        ["Returned", "Owner", "Guest", "Contractor",
+         "ALLIAHN","CAMILO","CATALINA","GONZALO","JHONNY","LUIS","POL","STELLA"]
     )
 
-    # only show return-calendar for Owner/Guest
     return_date = None
-    if assignee in ("Owner","Guest"):
-        return_date = st.date_input(
-            "Return Date",
-            key="return_date"
-        ).isoformat()
+    if assignee in ("Owner", "Guest"):
+        return_date = st.date_input("Return Date").isoformat()
 
     submitted = st.form_submit_button("Update Record")
     if submitted:
-        if not tag_input.strip():
-            st.error("❗ Please scan or enter a Tag Code.")
+        if not tag_code.strip():
+            st.error("❗ Please enter or scan a Tag Code.")
         else:
-            result = update_key_status(tag_input.strip(), assignee, return_date)
-            if result.startswith("✅"):
-                st.success(result)
-                # reset form fields
-                st.session_state["tag_input"] = ""
-                st.session_state["assignee_select"] = "Returned"
-                if "return_date" in st.session_state:
-                    st.session_state["return_date"] = None
+            msg = update_key_status(tag_code.strip(), assignee, return_date)
+            if msg.startswith("✅"):
+                st.success(msg)
             else:
-                st.error(result)
+                st.error(msg)
