@@ -4,10 +4,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 
-# ── CONFIG ─────────────────────────────────────────────────────────────────────
-SPREADSHEET_ID = st.secrets["gcp_service_account"]["spreadsheet_id"]
-WORKSHEET_NAME = "Key Register"
+# ─── CONFIG ──────────────────────────────────────────────────────────────────────
+SPREADSHEET_ID   = st.secrets["gcp_service_account"]["spreadsheet_id"]
+WORKSHEET_NAME   = "Key Register"
+ALL_USERS        = ["ALLIAHN","CAMILO","CATALINA","GONZALO","JHONNY","LUIS","POL","STELLA"]
+ASSIGNEE_OPTIONS = ["Returned","Owner","Guest","Contractor"] + ALL_USERS
 
+# ─── HELPERS ─────────────────────────────────────────────────────────────────────
 def get_gspread_client():
     creds_dict = st.secrets["gcp_service_account"]
     creds = Credentials.from_service_account_info(
@@ -20,13 +23,8 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 def update_key_status(tag_code: str, assignee: str, return_date: str|None) -> str:
-    """
-    Updates the 'Observation' cell for the row whose 'Tag' equals tag_code.
-    - If assignee == "Returned", leaves Observation blank.
-    - Otherwise writes "ASSIGNEE @ UTC_ISO_TIMESTAMP" plus optional "– return by YYYY‑MM‑DD".
-    """
     client = get_gspread_client()
-    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
+    sheet  = client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
 
     headers = sheet.row_values(2)
     try:
@@ -36,48 +34,63 @@ def update_key_status(tag_code: str, assignee: str, return_date: str|None) -> st
         return f"❌ Missing column: {e}"
 
     records = sheet.get_all_records(head=2)
-    row_num = next((i+3 for i, r in enumerate(records) if str(r.get("Tag","")).strip() == tag_code), None)
+    row_num = next((i+3 for i,r in enumerate(records) 
+                    if str(r.get("Tag","")).strip()==tag_code), None)
     if row_num is None:
         return f"❌ Tag “{tag_code}” not found."
 
-    if assignee == "Returned":
-        obs_text = ""
+    if assignee=="Returned":
+        obs = ""
     else:
-        ts = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-        obs_text = f"{assignee} @ {ts}"
+        ts  = datetime.utcnow().replace(microsecond=0).isoformat()+"Z"
+        obs  = f"{assignee} @ {ts}"
         if return_date:
-            obs_text += f" – return by {return_date}"
+            obs += f" – return by {return_date}"
 
-    sheet.update_cell(row_num, obs_col, obs_text)
+    sheet.update_cell(row_num, obs_col, obs)
     return f"✅ Record updated on row {row_num}."
 
-# ── UI ───────────────────────────────────────────────────────────────────────────
+# ─── UI ──────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Key Register", layout="centered")
 st.title("🔑 Key Register Scanner")
+
 st.markdown(
-    "Scan a tag with your scanner (or type), pick who holds it, optionally select a return date, "
-    "and click **Update Record**."
+    "Scan a tag (or type it), pick who holds it, optionally set a return date, "
+    "then click **Update Record**."
 )
 
 with st.form("key_form", clear_on_submit=True):
-    tag_code = st.text_input("Tag Code", placeholder="e.g. M001")
+    tag_code = st.text_input(
+        label="Tag Code", 
+        placeholder="e.g. M001", 
+        key="tag_input"
+    )
 
     assignee = st.selectbox(
         "Assign to:",
-        ["Returned", "Owner", "Guest", "Contractor",
-         "ALLIAHN","CAMILO","CATALINA","GONZALO","JHONNY","LUIS","POL","STELLA"]
+        ASSIGNEE_OPTIONS,
+        key="assignee_select"
     )
 
+    # Only show calendar if Owner or Guest
     return_date = None
-    if assignee in ("Owner", "Guest"):
-        return_date = st.date_input("Return Date").isoformat()
+    if assignee in ("Owner","Guest"):
+        return_date = st.date_input(
+            "Return Date", 
+            key="return_date"
+        ).isoformat()
 
     submitted = st.form_submit_button("Update Record")
+
     if submitted:
         if not tag_code.strip():
             st.error("❗ Please enter or scan a Tag Code.")
         else:
-            msg = update_key_status(tag_code.strip(), assignee, return_date)
+            msg = update_key_status(
+                tag_code.strip(),
+                assignee,
+                return_date
+            )
             if msg.startswith("✅"):
                 st.success(msg)
             else:
