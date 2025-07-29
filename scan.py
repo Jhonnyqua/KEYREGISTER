@@ -1,110 +1,119 @@
 # scan.py
-
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 
-# -----------------------
-# 1) Authenticate with Google Sheets via st.secrets
-# -----------------------
-@st.cache_resource
+# --- CONFIGURE YOUR SHEET NAME & SECRETS KEY ---
+SPREADSHEET_ID = st.secrets["gcp_service_account"]["spreadsheet_id"]
+WORKSHEET_NAME = "Key Register"
+
 def get_gspread_client():
     creds_dict = st.secrets["gcp_service_account"]
     creds = Credentials.from_service_account_info(
         creds_dict,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ],
+        scopes=["https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"]
     )
     return gspread.authorize(creds)
 
-# -----------------------
-# 2) Update a single key’s Observation cell
-# -----------------------
-def update_key_record(key_code: str, assignee: str, return_date=None) -> str:
+def update_key_status(tag_code: str, assignee: str, return_date: str|None):
     """
-    key_code: the tag (e.g. "M001")
-    assignee: one of "Owner", "Guest", "Contractor", or "Returned"
-    return_date: a datetime.date if assignee is Guest or Owner, else None
+    Finds the row where Tag == tag_code and writes in the Observation column:
+      - blank if assignee == "Returned"
+      - f"{assignee} @ {ISO timestamp}"   if Owner/Guest/Contractor/name
+      - if return_date provided, append " – return by YYYY-MM-DD"
     """
+    client = get_gspread_client()
+    sheet = client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
+    headers = sheet.row_values(2)
+    records = sheet.get_all_records(head=2)
+
     try:
-        client = get_gspread_client()
-        ss = client.open_by_key(st.secrets["gcp_service_account"]["spreadsheet_id"])
-        sheet = ss.worksheet("Key Register")
-
-        # Read headers & records
-        headers = sheet.row_values(2)             # row 2 = headers
-        records = sheet.get_all_records(head=2)   # data from row 3 onward
-
-        # Find column indexes (1‑based)
         tag_col = headers.index("Tag") + 1
         obs_col = headers.index("Observation") + 1
+    except ValueError as e:
+        return f"❌ Missing column in sheet: {e}"
 
-        # Locate the correct row
-        row_to_update = None
-        for idx, rec in enumerate(records, start=3):
-            if rec.get("Tag", "").strip() == key_code:
-                row_to_update = idx
-                break
+    # find matching row
+    row_num = None
+    for idx, rec in enumerate(records, start=3):
+        if str(rec.get("Tag","")).strip() == tag_code:
+            row_num = idx
+            break
 
-        if row_to_update is None:
-            return f"❌ Key '{key_code}' not found."
+    if not row_num:
+        return f"❌ Tag “{tag_code}” not found."
 
-        # Build the new Observation text
-        if assignee == "Returned":
-            obs_text = ""  # clear the cell completely
-        else:
-            obs_text = assignee
-            if assignee in ("Guest", "Owner") and return_date:
-                obs_text += f" until {return_date.strftime('%Y-%m-%d')}"
-            # Append timestamp for non‑returned
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            obs_text += f" | {timestamp}"
+    # build observation text
+    if assignee == "Returned":
+        obs_text = ""
+    else:
+        ts = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        obs_text = f"{assignee} @ {ts}"
+        if return_date:
+            obs_text += f" – return by {return_date}"
 
-        # Write back to the sheet
-        sheet.update_cell(row_to_update, obs_col, obs_text)
-        return f"✅ Record updated in row {row_to_update}."
+    # perform update
+    sheet.update_cell(row_num, obs_col, obs_text)
+    return f"✅ Record updated on row {row_num}."
 
-    except Exception as e:
-        return f"❌ Error updating record: {e}"
-
-# -----------------------
-# 3) Streamlit UI
-# -----------------------
+# --- UI ---
 st.set_page_config(page_title="Key Register", layout="centered")
-st.title("🔑 Key Register")
+st.title("🔑 Key Register Scanner")
+st.markdown("""
+Scan a tag with your scanner (or type manually), choose who holds it,
+and click **Update Record**.  
+""")
 
-# Form for input and automatic reset
-with st.form("key_form"):
-    tag_input = st.text_input("Tag Code", key="tag_input", placeholder="e.g. M001")
-    assignee = st.selectbox(
-        "Assign to:",
-        ["Owner", "Guest", "Contractor", "Returned"],
-        key="assignee_select",
+with st.form("key_form", clear_on_submit=False):
+    tag_input = st.text_input(
+        "Tag Code",
+        placeholder="e.g. M001",
+        key="tag_input"
     )
 
+    options = [
+        "Returned",       # always first
+        "Owner",
+        "Guest",
+        "Contractor",
+        "ALLIAHN",
+        "CAMILO",
+        "CATALINA",
+        "GONZALO",
+        "JHONNY",
+        "LUIS",
+        "POL",
+        "STELLA"
+    ]
+    assignee = st.selectbox(
+        "Assign to:",
+        options,
+        index=0,
+        key="assignee_select"
+    )
+
+    # only show return-calendar for Owner/Guest
     return_date = None
-    if assignee in ("Guest", "Owner"):
-        return_date = st.date_input("Return Date", key="return_date")
+    if assignee in ("Owner","Guest"):
+        return_date = st.date_input(
+            "Return Date",
+            key="return_date"
+        ).isoformat()
 
     submitted = st.form_submit_button("Update Record")
-
-if submitted:
-    if not tag_input.strip():
-        st.error("❗ Please enter or scan a Tag Code first.")
-    else:
-        result = update_key_record(
-            key_code=tag_input.strip(),
-            assignee=assignee,
-            return_date=return_date if assignee in ("Guest", "Owner") else None,
-        )
-        if result.startswith("✅"):
-            st.success(result)
-            # Clear fields after success
-            st.session_state["tag_input"] = ""
-            if "return_date" in st.session_state:
-                st.session_state["return_date"] = None
+    if submitted:
+        if not tag_input.strip():
+            st.error("❗ Please scan or enter a Tag Code.")
         else:
-            st.error(result)
+            result = update_key_status(tag_input.strip(), assignee, return_date)
+            if result.startswith("✅"):
+                st.success(result)
+                # reset form fields
+                st.session_state["tag_input"] = ""
+                st.session_state["assignee_select"] = "Returned"
+                if "return_date" in st.session_state:
+                    st.session_state["return_date"] = None
+            else:
+                st.error(result)
