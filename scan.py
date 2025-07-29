@@ -1,96 +1,110 @@
+# app.py
 import streamlit as st
 import gspread
-import pandas as pd
-import re
-from io import BytesIO
-from PIL import Image
-from pyzbar.pyzbar import decode
 from google.oauth2.service_account import Credentials
 
-# ————— Autorización a Google Sheets —————
-def authorize_gspread():
+# ------------ CONFIGURACIÓN DE SECRETS  ------------
+# En tu .streamlit/secrets.toml deberías tener:
+#
+# [gcp_service_account]
+# type = "service_account"
+# project_id = "..."
+# private_key_id = "..."
+# private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+# client_email = "..."
+# client_id = "..."
+# auth_uri = "..."
+# token_uri = "..."
+# auth_provider_x509_cert_url = "..."
+# client_x509_cert_url = "..."
+# spreadsheet_id = "TU_SPREADSHEET_ID"
+#
+# ----------------------------------------------------
+
+@st.cache_resource
+def get_gspread_client():
     creds_dict = st.secrets["gcp_service_account"]
-    credentials = Credentials.from_service_account_info(
+    creds = Credentials.from_service_account_info(
         creds_dict,
-        scopes=[
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ],
+        scopes=["https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"]
     )
-    return gspread.authorize(credentials)
+    return gspread.authorize(creds)
 
-# ————— Actualización en hoja —————
-def update_key_status(key_code: str, new_status: str) -> str:
-    client = authorize_gspread()
-    sheet_id = st.secrets["gcp_service_account"]["spreadsheet_id"]
-    sheet = client.open_by_key(sheet_id).worksheet("Key Register")
-
-    # recuperar encabezados y registros
-    headers = sheet.row_values(2)
-    records = sheet.get_all_records(head=2)
-
-    # ubicar columnas
+def update_key_status(tag_code: str, new_observation: str) -> str:
+    client = get_gspread_client()
+    ss = client.open_by_key(st.secrets["gcp_service_account"]["spreadsheet_id"])
     try:
-        tag_col = headers.index("Tag") + 1
-        obs_col = headers.index("Observation") + 1
-    except ValueError as e:
-        return f"Encabezado faltante: {e}"
+        sheet = ss.worksheet("Key Register")
+    except Exception as e:
+        return f"❌ No pude abrir la hoja 'Key Register': {e}"
 
-    # buscar fila
-    row_to_update = next(
-        (i + 3 for i, rec in enumerate(records) if rec.get("Tag","").strip() == key_code),
-        None
-    )
-    if not row_to_update:
-        return f"Código '{key_code}' no encontrado."
+    # lee encabezados en fila 2
+    headers = sheet.row_values(2)
+    try:
+        idx_tag = headers.index("Tag") + 1
+        idx_obs = headers.index("Observation") + 1
+    except ValueError as ve:
+        return f"❌ No encuentro columna {ve}"
 
-    # actualizar
-    sheet.update_cell(row_to_update, obs_col, new_status)
-    return f"Fila {row_to_update} actualizada: '{new_status}'."
+    # busca fila donde Tag == tag_code
+    records = sheet.get_all_records(head=2)  # retorna dicts de fila 3 en adelante
+    target_row = None
+    for i, rec in enumerate(records, start=3):
+        if str(rec.get("Tag","")).strip() == tag_code:
+            target_row = i
+            break
 
-# ————— Streamlit UI —————
-st.set_page_config(page_title="Key Register with Camera", layout="wide")
-st.title("🔑 Key Register Scanner")
+    if target_row is None:
+        return f"❌ Tag '{tag_code}' no encontrado."
 
-st.markdown("""
-1. **Escanea** el código con la cámara  
-2. **Selecciona** a quién asignar  
-3. **Actualiza** la hoja en Google Sheets  
+    # actualiza
+    try:
+        sheet.update_cell(target_row, idx_obs, new_observation)
+        return f"✅ Registro actualizado en fila {target_row}."
+    except Exception as e:
+        return f"❌ Error al actualizar: {e}"
+
+# --- INTERFAZ STREAMLIT ---
+st.set_page_config(page_title="Key Register", layout="centered")
+st.title("🔑 Key Register Automático")
+st.markdown(
+    """
+Escanea un código con tu lector **HID** directamente en el campo, selecciona a quién asignar  
+ó marca **Returned** para liberar la llave.
 """)
 
-# — Cámara ➔ File
-img_file = st.camera_input("📷 Escanea el código de barras o QR")
-
-key_code = ""
-if img_file:
-    # decodificar
-    pil_img = Image.open(img_file)
-    barcodes = decode(pil_img)
-    if barcodes:
-        key_code = barcodes[0].data.decode("utf-8")
-        st.success(f"Código detectado: **{key_code}**")
+with st.form("form_update"):
+    tag = st.text_input(
+        "Escanea aquí tu Tag",
+        placeholder="Ej: M001",
+        key="tag_input",
+        help="El lector tecleará el código y enviará el ENTER automáticamente."
+    )
+    # selecciona asignación
+    choice = st.selectbox(
+        "Asignar a:",
+        ["ALLIAHN","CAMILO","CATALINA","GONZALO","JHONNY","LUIS","POL","STELLA","CONTRACTOR","Returned"],
+        help="Elige 'Returned' para liberar (limpia Observation)"
+    )
+    # si es contractor pide nombre
+    if choice == "CONTRACTOR":
+        contractor = st.text_input("Nombre del contractor:")
+        final_assignee = contractor.strip() or "CONTRACTOR"
+    elif choice == "Returned":
+        final_assignee = ""
     else:
-        st.warning("No encontré un código legible. Intenta de nuevo.")
+        final_assignee = choice
 
-# — Dropdown de asignación
-names = ["ALLIAHN","CAMILO","CATALINA","CONTRACTOR","GONZALO","JHONNY","LUIS","POL","STELLA","Returned"]
-assigned = st.selectbox("Asignar a:", sorted(names))
-
-if assigned == "CONTRACTOR":
-    contractor_name = st.text_input("Nombre del contratista:")
-    final_assigned = contractor_name.strip() or "CONTRACTOR"
-elif assigned == "Returned":
-    final_assigned = ""
-else:
-    final_assigned = assigned
-
-# — Botón de actualización
-if st.button("📝 Actualizar hoja"):
-    if not key_code:
-        st.error("Primero escanea un código válido.")
-    else:
-        result = update_key_status(key_code, final_assigned)
-        if result.startswith("Fila"):
-            st.success(result)
+    submitted = st.form_submit_button("Actualizar registro")
+    if submitted:
+        if not tag.strip():
+            st.error("🔴 Por favor escanea un Tag válido.")
         else:
-            st.error(result)
+            result = update_key_status(tag.strip(), final_assignee)
+            if result.startswith("✅"):
+                st.success(result)
+                # Después de un éxito, limpio campo
+                st.session_state["tag_input"] = ""
+            else:
+                st.error(result)
