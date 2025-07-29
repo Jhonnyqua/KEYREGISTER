@@ -1,82 +1,110 @@
+# scan.py
+
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 
-# --- 1) Authenticate with Google Sheets via st.secrets ---
+# -----------------------
+# 1) Authenticate with Google Sheets via st.secrets
+# -----------------------
+@st.cache_resource
 def get_gspread_client():
+    creds_dict = st.secrets["gcp_service_account"]
     creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
+        creds_dict,
         scopes=[
             "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
+            "https://www.googleapis.com/auth/drive",
         ],
     )
     return gspread.authorize(creds)
 
-# --- 2) Update a key record in the sheet ---
-def update_key_record(key_code: str, assignee: str, return_date=None):
+# -----------------------
+# 2) Update a single key’s Observation cell
+# -----------------------
+def update_key_record(key_code: str, assignee: str, return_date=None) -> str:
+    """
+    key_code: the tag (e.g. "M001")
+    assignee: one of "Owner", "Guest", "Contractor", or "Returned"
+    return_date: a datetime.date if assignee is Guest or Owner, else None
+    """
     try:
         client = get_gspread_client()
         ss = client.open_by_key(st.secrets["gcp_service_account"]["spreadsheet_id"])
         sheet = ss.worksheet("Key Register")
 
-        headers = sheet.row_values(2)
-        records = sheet.get_all_records(head=2)
+        # Read headers & records
+        headers = sheet.row_values(2)             # row 2 = headers
+        records = sheet.get_all_records(head=2)   # data from row 3 onward
 
+        # Find column indexes (1‑based)
         tag_col = headers.index("Tag") + 1
         obs_col = headers.index("Observation") + 1
 
-        # find the row matching key_code
+        # Locate the correct row
         row_to_update = None
-        for i, rec in enumerate(records, start=3):
+        for idx, rec in enumerate(records, start=3):
             if rec.get("Tag", "").strip() == key_code:
-                row_to_update = i
+                row_to_update = idx
                 break
 
         if row_to_update is None:
             return f"❌ Key '{key_code}' not found."
 
-        # build the observation text
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Build the new Observation text
         if assignee == "Returned":
-            obs = ""  # clear the observation
+            obs_text = ""  # clear the cell completely
         else:
-            obs = assignee
+            obs_text = assignee
             if assignee in ("Guest", "Owner") and return_date:
-                obs += f" until {return_date.strftime('%Y-%m-%d')}"
-        obs += f" | {now}"
+                obs_text += f" until {return_date.strftime('%Y-%m-%d')}"
+            # Append timestamp for non‑returned
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            obs_text += f" | {timestamp}"
 
-        sheet.update_cell(row_to_update, obs_col, obs)
+        # Write back to the sheet
+        sheet.update_cell(row_to_update, obs_col, obs_text)
         return f"✅ Record updated in row {row_to_update}."
 
     except Exception as e:
         return f"❌ Error updating record: {e}"
 
-# --- 3) Build the Streamlit UI ---
-st.set_page_config(page_title="🔑 Key Register", layout="centered")
+# -----------------------
+# 3) Streamlit UI
+# -----------------------
+st.set_page_config(page_title="Key Register", layout="centered")
 st.title("🔑 Key Register")
 
+# Form for input and automatic reset
 with st.form("key_form"):
-    key_code = st.text_input("Scan or enter the key code:")
+    tag_input = st.text_input("Tag Code", key="tag_input", placeholder="e.g. M001")
     assignee = st.selectbox(
         "Assign to:",
-        ["Returned", "Guest", "Owner", "ALLIAHN", "CAMILO", "CATALINA",
-         "GONZALO", "JHONNY", "LUIS", "POL", "STELLA"]
+        ["Owner", "Guest", "Contractor", "Returned"],
+        key="assignee_select",
     )
 
     return_date = None
     if assignee in ("Guest", "Owner"):
-        return_date = st.date_input("Return date:")
+        return_date = st.date_input("Return Date", key="return_date")
 
-    submit = st.form_submit_button("Update record")
+    submitted = st.form_submit_button("Update Record")
 
-if submit:
-    if not key_code.strip():
-        st.error("Please enter a valid key code.")
+if submitted:
+    if not tag_input.strip():
+        st.error("❗ Please enter or scan a Tag Code first.")
     else:
-        msg = update_key_record(key_code.strip(), assignee, return_date)
-        if msg.startswith("✅"):
-            st.success(msg)
+        result = update_key_record(
+            key_code=tag_input.strip(),
+            assignee=assignee,
+            return_date=return_date if assignee in ("Guest", "Owner") else None,
+        )
+        if result.startswith("✅"):
+            st.success(result)
+            # Clear fields after success
+            st.session_state["tag_input"] = ""
+            if "return_date" in st.session_state:
+                st.session_state["return_date"] = None
         else:
-            st.error(msg)
+            st.error(result)
