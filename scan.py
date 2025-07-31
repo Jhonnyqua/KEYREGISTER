@@ -35,16 +35,20 @@ def update_key(tag, assignee, return_date_iso):
     obs_col = headers.index("Observation") + 1
 
     records = ws.get_all_records(head=2)
-    row = next((i+3 for i,r in enumerate(records) if str(r.get("Tag","")).strip()==tag), None)
-    if not row:
+    row = next(
+        (i + 3 for i, r in enumerate(records) if str(r.get("Tag", "")).strip() == tag),
+        None,
+    )
+    if row is None:
         return f"No key found for '{tag}'."
 
     # build the Observation
     if assignee == "Returned":
         obs = ""
     else:
-        ts = datetime.now(ZoneInfo("Australia/Brisbane"))\
-                 .replace(microsecond=0).isoformat(sep=" ")
+        ts = datetime.now(ZoneInfo("Australia/Brisbane")).replace(
+            microsecond=0
+        ).isoformat(sep=" ")
         obs = f"{assignee} @ {ts}"
         if return_date_iso:
             obs += f" • Return: {return_date_iso}"
@@ -55,7 +59,7 @@ def update_key(tag, assignee, return_date_iso):
     except Exception as e:
         return f"Error writing to sheet: {e}"
 
-# ── The form (auto-clears when submitted) ─────────────────────
+# ── The form (auto-clears on submit) ──────────────────────────
 with st.form("key_form", clear_on_submit=True):
     st.text_input("Tag code (e.g. M001)", key="tag_input")
 
@@ -66,16 +70,23 @@ with st.form("key_form", clear_on_submit=True):
             "Owner",
             "Guest",
             "Contractor",
-            "ALLIAHN","CAMILO","CATALINA","GONZALO",
-            "JHONNY","LUIS","POL","STELLA",
+            "ALLIAHN",
+            "CAMILO",
+            "CATALINA",
+            "GONZALO",
+            "JHONNY",
+            "LUIS",
+            "POL",
+            "STELLA",
         ],
         key="who",
     )
 
-    # dynamic fields:
+    # dynamic extra fields:
     return_date_iso = ""
     if assignee in ("Owner", "Guest"):
         return_date_iso = st.date_input("Return date", key="ret").isoformat()
+
     contractor_name = ""
     if assignee == "Contractor":
         contractor_name = st.text_input("Contractor name", key="cont").strip()
@@ -87,12 +98,14 @@ with st.form("key_form", clear_on_submit=True):
             st.error("Please scan a valid tag first.")
         else:
             final_assignee = (
-                contractor_name or "Contractor"
-                if assignee == "Contractor"
-                else assignee
+                contractor_name if assignee == "Contractor" and contractor_name else assignee
             )
             msg = update_key(tag, final_assignee, return_date_iso)
-            st.success(msg) if msg.startswith("✅") else st.error(msg)
+            # *** USE A NORMAL IF/ELSE HERE ***
+            if msg.startswith("✅"):
+                st.success(msg)
+            else:
+                st.error(msg)
 
 # ── End-of-Day Notes ────────────────────────────────────────────
 st.markdown("---")
