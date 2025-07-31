@@ -4,16 +4,13 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 import pandas as pd
 
-# ─── IMPORT & ADJUST RERUN EXCEPTION ────────────────────────────────────────
-# new signature: RerunException(rerun_data)
+# ─── IMPORT & ADJUST RERUN EXCEPTION ────────────────────────────────────
 from streamlit.runtime.scriptrunner import RerunException
-
 def rerun():
     """Trigger a full Streamlit rerun."""
     raise RerunException(rerun_data={})
 
-
-# ─── PAGE SETUP & CONFIG ────────────────────────────────────────────────────
+# ─── PAGE CONFIG ────────────────────────────────────────────────────────
 st.set_page_config(page_title="Key Register Scanner", layout="centered")
 
 SPREADSHEET_ID   = st.secrets["gcp_service_account"]["spreadsheet_id"]
@@ -21,8 +18,7 @@ WORKSHEET_NAME   = "Key Register"
 ALL_USERS        = ["ALLIAHN","CAMILO","CATALINA","GONZALO","JHONNY","LUIS","POL","STELLA"]
 ASSIGNEE_OPTIONS = ["Returned","Owner","Guest","Contractor"] + ALL_USERS
 
-
-# ─── CACHED GSHEET CLIENT ───────────────────────────────────────────────────
+# ─── CACHED GOOGLE SHEETS CLIENT ─────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_gsheet_client():
     creds = Credentials.from_service_account_info(
@@ -34,8 +30,7 @@ def get_gsheet_client():
     )
     return gspread.authorize(creds)
 
-
-# ─── BUSINESS LOGIC ────────────────────────────────────────────────────────
+# ─── CORE FUNCTIONS ──────────────────────────────────────────────────────
 def update_key_status(tag_code: str, assignee: str, return_date: str|None) -> str:
     client = get_gsheet_client()
     sheet  = client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
@@ -56,7 +51,7 @@ def update_key_status(tag_code: str, assignee: str, return_date: str|None) -> st
     if row_num is None:
         return f"❌ Tag “{tag_code}” not found."
 
-    # build the observation text
+    # Build the observation string
     if assignee == "Returned":
         obs = ""
     else:
@@ -68,40 +63,48 @@ def update_key_status(tag_code: str, assignee: str, return_date: str|None) -> st
     sheet.update_cell(row_num, obs_col, obs)
     return f"✅ Record updated on row {row_num}."
 
-
 def fetch_notes_dataframe() -> pd.DataFrame:
     client = get_gsheet_client()
     sheet  = client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
     df     = pd.DataFrame(sheet.get_all_records(head=2))
     return df[df["Observation"].astype(str).str.strip() != ""]
 
-
-# ─── UI LAYOUT ─────────────────────────────────────────────────────────────
+# ─── UI LAYOUT ───────────────────────────────────────────────────────────
 st.title("🔑 Key Register Scanner")
-st.markdown("Scan or enter a Tag Code, assign it, optionally pick a return date, then click **Update Record**.")
+st.markdown("Scan or type a Tag Code, choose assignment, optionally pick a return date, then click **Update Record**.")
 
+# 1) Tag code input
 tag_code = st.text_input("Tag Code", placeholder="e.g. M001", key="tag_input")
+
+# 2) Assignee selection
 assignee = st.selectbox("Assign to:", ASSIGNEE_OPTIONS, key="assignee_select")
 
-# show calendar immediately when Owner or Guest is chosen
+# 3) If Contractor → show a text field
+contractor_name = None
+if assignee == "Contractor":
+    contractor_name = st.text_input("Contractor Name", key="contractor_name")
+    final_assignee = contractor_name.strip() or "Contractor"
+else:
+    final_assignee = assignee
+
+# 4) If Owner or Guest → show return-date picker
 return_date = None
-if assignee in ("Owner", "Guest"):
+if final_assignee in ("Owner", "Guest"):
     return_date = st.date_input("Return Date", key="return_date").isoformat()
 
+# 5) Update button
 if st.button("Update Record"):
     if not tag_code.strip():
         st.error("❗ Please enter a Tag Code.")
     else:
-        msg = update_key_status(tag_code.strip(), assignee, return_date)
+        msg = update_key_status(tag_code.strip(), final_assignee, return_date)
         if msg.startswith("✅"):
             st.success(msg)
-            # rerun clears all inputs
-            rerun()
+            rerun()                # clear all inputs immediately
         else:
             st.error(msg)
 
-
-# ─── END-OF-DAY NOTES ───────────────────────────────────────────────────────
+# ─── END-OF-DAY NOTES ─────────────────────────────────────────────────────
 st.markdown("---")
 st.header("🔍 End-of-Day Notes")
 notes_df = fetch_notes_dataframe()
@@ -109,6 +112,6 @@ if notes_df.empty:
     st.info("All tags returned—no outstanding notes.")
 else:
     st.dataframe(
-        notes_df[["Tag", "Observation"]],
+        notes_df[["Tag","Observation"]],
         use_container_width=True
     )
