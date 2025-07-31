@@ -1,4 +1,3 @@
-# scan.py
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
@@ -26,6 +25,7 @@ def get_gsheet_client():
     return gspread.authorize(creds)
 
 def update_key_status(tag_code: str, assignee: str, return_date: str|None) -> str:
+    """Update the Observation cell for a given tag."""
     client = get_gsheet_client()
     sheet  = client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
 
@@ -55,18 +55,17 @@ def update_key_status(tag_code: str, assignee: str, return_date: str|None) -> st
     return f"✅ Record updated on row {row_num}."
 
 def fetch_notes_dataframe() -> pd.DataFrame:
+    """Pull all rows with non‐empty Observation for end‐of‐day review."""
     client = get_gsheet_client()
     sheet  = client.open_by_key(SPREADSHEET_ID).worksheet(WORKSHEET_NAME)
     data   = sheet.get_all_records(head=2)
     df     = pd.DataFrame(data)
-    # Keep only rows with a non-empty Observation:
     return df[df["Observation"].astype(str).str.strip() != ""]
 
 # ─── UI ──────────────────────────────────────────────────────────────────────────
 st.title("🔑 Key Register Scanner")
 st.markdown("Scan or type a Tag Code, pick who holds it, optionally set a return date, then click **Update**.")
 
-# Controlled inputs outside of a form so that any change immediately reruns the script:
 tag_code = st.text_input("Tag Code", placeholder="e.g. M001", key="tag_input")
 assignee = st.selectbox("Assign to:", ASSIGNEE_OPTIONS, key="assignee_select")
 
@@ -75,7 +74,6 @@ return_date = None
 if assignee in ("Owner","Guest"):
     return_date = st.date_input("Return Date", key="return_date").isoformat()
 
-# Update button
 if st.button("Update Record"):
     if not tag_code.strip():
         st.error("❗ Please enter or scan a Tag Code.")
@@ -83,11 +81,8 @@ if st.button("Update Record"):
         msg = update_key_status(tag_code.strip(), assignee, return_date)
         if msg.startswith("✅"):
             st.success(msg)
-            # reset fields:
-            st.session_state.tag_input    = ""
-            st.session_state.assignee_select = "Returned"
-            if "return_date" in st.session_state:
-                st.session_state.return_date = None
+            # trigger a full rerun to clear all widgets back to defaults
+            st.experimental_rerun()
         else:
             st.error(msg)
 
@@ -98,5 +93,4 @@ notes_df = fetch_notes_dataframe()
 if notes_df.empty:
     st.info("All tags returned—no outstanding notes.")
 else:
-    # Only show Tag / Observation columns
-    st.dataframe(notes_df[["Tag","Observation"]])
+    st.dataframe(notes_df[["Tag","Observation"]], use_container_width=True)
