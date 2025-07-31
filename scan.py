@@ -73,7 +73,7 @@ if 'reset_form' not in st.session_state:
     st.session_state.reset_form = False
 
 # ── The Form ───────────────────────────────────────────────────
-with st.form("key_form", clear_on_submit=True):
+with st.form("key_form"):
     st.info("Scan or type your Tag code, then choose who has it.")
     
     # Use a unique key for the text input
@@ -124,7 +124,7 @@ with st.form("key_form", clear_on_submit=True):
 if st.session_state.reset_form:
     st.session_state.reset_form = False
     st.session_state.form_submitted = True
-    st.experimental_rerun()
+    st.rerun()
 
 # ── End-of-Day Notes ───────────────────────────────────────────
 st.markdown("---")
