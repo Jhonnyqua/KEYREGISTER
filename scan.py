@@ -22,7 +22,7 @@ def gs_client():
     )
     return gspread.authorize(creds)
 
-# ── Function to write back to the sheet ───────────────────────
+# ── Write back to Google Sheets ───────────────────────────────
 def update_key(tag, assignee, return_date_iso):
     try:
         ws = gs_client().open_by_key(SPREADSHEET_ID).worksheet("Key Register")
@@ -36,19 +36,18 @@ def update_key(tag, assignee, return_date_iso):
 
     records = ws.get_all_records(head=2)
     row = next(
-        (i + 3 for i, r in enumerate(records) if str(r.get("Tag", "")).strip() == tag),
+        (i + 3 for i, r in enumerate(records)
+         if str(r.get("Tag", "")).strip() == tag),
         None,
     )
     if row is None:
         return f"No key found for '{tag}'."
 
-    # build the Observation
     if assignee == "Returned":
         obs = ""
     else:
-        ts = datetime.now(ZoneInfo("Australia/Brisbane")).replace(
-            microsecond=0
-        ).isoformat(sep=" ")
+        ts = datetime.now(ZoneInfo("Australia/Brisbane"))\
+            .replace(microsecond=0).isoformat(sep=" ")
         obs = f"{assignee} @ {ts}"
         if return_date_iso:
             obs += f" • Return: {return_date_iso}"
@@ -59,9 +58,11 @@ def update_key(tag, assignee, return_date_iso):
     except Exception as e:
         return f"Error writing to sheet: {e}"
 
-# ── The form (auto-clears on submit) ──────────────────────────
+# ── The form ───────────────────────────────────────────────────
+result_message = None
+
 with st.form("key_form", clear_on_submit=True):
-    st.text_input("Tag code (e.g. M001)", key="tag_input")
+    tag = st.text_input("Tag code (e.g. M001)", key="tag_input")
 
     assignee = st.selectbox(
         "Assign to:",
@@ -70,19 +71,12 @@ with st.form("key_form", clear_on_submit=True):
             "Owner",
             "Guest",
             "Contractor",
-            "ALLIAHN",
-            "CAMILO",
-            "CATALINA",
-            "GONZALO",
-            "JHONNY",
-            "LUIS",
-            "POL",
-            "STELLA",
+            "ALLIAHN","CAMILO","CATALINA","GONZALO",
+            "JHONNY","LUIS","POL","STELLA",
         ],
         key="who",
     )
 
-    # dynamic extra fields:
     return_date_iso = ""
     if assignee in ("Owner", "Guest"):
         return_date_iso = st.date_input("Return date", key="ret").isoformat()
@@ -93,21 +87,29 @@ with st.form("key_form", clear_on_submit=True):
 
     submitted = st.form_submit_button("Update Record")
     if submitted:
-        tag = st.session_state.tag_input.strip()
-        if not tag:
-            st.error("Please scan a valid tag first.")
+        if not tag.strip():
+            result_message = ("error", "Please scan a valid tag first.")
         else:
             final_assignee = (
-                contractor_name if assignee == "Contractor" and contractor_name else assignee
+                contractor_name
+                if assignee == "Contractor" and contractor_name
+                else assignee
             )
-            msg = update_key(tag, final_assignee, return_date_iso)
-            # *** USE A NORMAL IF/ELSE HERE ***
+            msg = update_key(tag.strip(), final_assignee, return_date_iso)
             if msg.startswith("✅"):
-                st.success(msg)
+                result_message = ("success", msg)
             else:
-                st.error(msg)
+                result_message = ("error", msg)
 
-# ── End-of-Day Notes ────────────────────────────────────────────
+# ── Show the success / error AFTER the form ──────────────────
+if result_message:
+    status, text = result_message
+    if status == "success":
+        st.success(text)
+    else:
+        st.error(text)
+
+# ── End-of-Day Notes ───────────────────────────────────────────
 st.markdown("---")
 if st.button("🔍 Show End-of-Day Notes"):
     ws = gs_client().open_by_key(SPREADSHEET_ID).worksheet("Key Register")
