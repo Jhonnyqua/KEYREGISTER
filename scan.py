@@ -100,22 +100,19 @@ contractor_name = ""
 if assignee == "Contractor":
     contractor_name = st.text_input("Contractor name").strip()
 
-# … widgets Tag + Assignee + dinámicos …
-
+# 4) Update button
 if st.button("Update Record"):
     if not tag.strip():
         st.error("Please scan a valid tag first.")
     else:
         final_assignee = (
-            contractor_name
-            if assignee == "Contractor" and contractor_name
+            contractor_name or "Contractor"
+            if assignee == "Contractor"
             else assignee
         )
         msg = update_key(tag.strip(), final_assignee, return_date)
         if msg.startswith("✅"):
             st.success(msg)
-            # ← Aquí es donde forzamos el rerun para limpiar TODO
-            st.experimental_rerun()
         else:
             st.error(msg)
 
