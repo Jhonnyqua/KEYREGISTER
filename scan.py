@@ -1,5 +1,3 @@
-# scan.py
-
 import streamlit as st
 import gspread
 import pandas as pd
@@ -8,13 +6,11 @@ from zoneinfo import ZoneInfo
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import SpreadsheetNotFound, APIError
 
-# ── Page config ───────────────────────────────────────────────
+# ── Page & Secrets ─────────────────────────────────────────────
 st.set_page_config("🔑 Key Register Scanner", layout="centered")
-
-# ── Secrets ───────────────────────────────────────────────────
 SPREADSHEET_ID = st.secrets["gcp_service_account"]["spreadsheet_id"]
 
-# ── Google Sheets Client (cached) ────────────────────────────
+# ── Google Sheets Client ───────────────────────────────────────
 @st.cache_resource
 def gs_client():
     creds = Credentials.from_service_account_info(
@@ -26,14 +22,21 @@ def gs_client():
     )
     return gspread.authorize(creds)
 
-# ── Update Function ───────────────────────────────────────────
-def update_key(tag, assignee, return_date_iso):
+# ── Update Function ─────────────────────────────────────────────
+def update_key(tag, assignee, return_date):
+    """
+    Finds the row in 'Key Register' where Tag == tag,
+    writes Observation = "" for Returned, or
+    f"{assignee} @ <Brisbane ISO ts>" [+ " • Return: YYYY-MM-DD"]
+    """
     try:
-        ss = gs_client().open_by_key(SPREADSHEET_ID)
+        client = gs_client()
+        ss = client.open_by_key(SPREADSHEET_ID)
         ws = ss.worksheet("Key Register")
     except (SpreadsheetNotFound, APIError) as e:
         return f"Error opening sheet: {e}"
 
+    # read headers & data
     headers = ws.row_values(2)
     if "Tag" not in headers or "Observation" not in headers:
         return "Sheet missing Tag/Observation columns"
@@ -41,31 +44,42 @@ def update_key(tag, assignee, return_date_iso):
     obs_col = headers.index("Observation") + 1
 
     records = ws.get_all_records(head=2)
-    row_idx = next((i+3 for i,r in enumerate(records)
-                    if str(r.get("Tag","")).strip()==tag), None)
-    if row_idx is None:
+    # find row
+    row = next((i+3 for i,r in enumerate(records)
+                if str(r.get("Tag","")).strip() == tag), None)
+    if row is None:
         return f"No key found for '{tag}'."
 
-    # build Observation
-    if assignee=="Returned":
+    # build observation
+    if assignee == "Returned":
         obs = ""
     else:
         ts = datetime.now(ZoneInfo("Australia/Brisbane"))\
-                 .replace(microsecond=0).isoformat(sep=" ")
+                .replace(microsecond=0).isoformat(sep=" ")
         obs = f"{assignee} @ {ts}"
-        if return_date_iso:
-            obs += f" • Return: {return_date_iso}"
+        if return_date:
+            obs += f" • Return: {return_date}"
 
     try:
-        ws.update_cell(row_idx, obs_col, obs)
-        return f"✅ Record updated on row {row_idx}."
+        ws.update_cell(row, obs_col, obs)
+        return f"✅ Record updated on row {row}."
     except Exception as e:
         return f"Error writing to sheet: {e}"
 
-# ── The form ──────────────────────────────────────────────────
-with st.form("key_form", clear_on_submit=True):
-    tag = st.text_input("Tag code (e.g. M001)", key="tag")
+# ── Initialize Session State ──────────────────────────────────
+if 'form_submitted' not in st.session_state:
+    st.session_state.form_submitted = False
+if 'reset_form' not in st.session_state:
+    st.session_state.reset_form = False
 
+# ── The Form ───────────────────────────────────────────────────
+with st.form("key_form", clear_on_submit=True):
+    st.info("Scan or type your Tag code, then choose who has it.")
+    
+    # Use a unique key for the text input
+    tag = st.text_input("Tag code (e.g. M001)", key="tag_input")
+    
+    # Assignee selection
     assignee = st.selectbox(
         "Assign to:",
         ["Returned", "Owner", "Guest", "Contractor",
@@ -74,34 +88,52 @@ with st.form("key_form", clear_on_submit=True):
         key="who",
     )
 
-    # conditional inputs
-    return_date_iso = ""
-    if assignee in ("Owner","Guest"):
-        return_date_iso = st.date_input("Return date", key="return_date").isoformat()
-    if assignee=="Contractor":
-        contractor_name = st.text_input("Contractor name", key="contractor")
-        final_assignee = contractor_name.strip() or "Contractor"
-    else:
-        final_assignee = assignee
+    # Dynamic fields based on selection
+    return_date = ""
+    contractor_name = ""
+    final_assignee = assignee
+    
+    # Show date picker for Owner/Guest
+    if assignee in ("Owner", "Guest"):
+        return_date = st.date_input(
+            "Return date", key="ret"
+        ).isoformat()
+    
+    # Show text input for Contractor
+    if assignee == "Contractor":
+        contractor_name = st.text_input(
+            "Contractor name", key="cont"
+        ).strip()
+        final_assignee = contractor_name or "Contractor"
 
     submitted = st.form_submit_button("Update Record")
+    
     if submitted:
         if not tag.strip():
             st.error("Please scan a valid tag first.")
         else:
-            msg = update_key(tag.strip(), final_assignee, return_date_iso)
+            msg = update_key(tag.strip(), final_assignee, return_date)
             if msg.startswith("✅"):
                 st.success(msg)
+                # Trigger form reset
+                st.session_state.reset_form = True
             else:
                 st.error(msg)
+
+# Reset form after successful submission
+if st.session_state.reset_form:
+    st.session_state.reset_form = False
+    st.session_state.form_submitted = True
+    st.experimental_rerun()
 
 # ── End-of-Day Notes ───────────────────────────────────────────
 st.markdown("---")
 if st.button("🔍 Show End-of-Day Notes"):
-    ws = gs_client().open_by_key(SPREADSHEET_ID).worksheet("Key Register")
+    client = gs_client()
+    ws = client.open_by_key(SPREADSHEET_ID).worksheet("Key Register")
     df = pd.DataFrame(ws.get_all_records(head=2))
-    notes = df[df["Observation"].astype(str).str.strip()!=""]
+    notes = df[df["Observation"].astype(str).str.strip() != ""]
     if notes.empty:
         st.info("No keys currently with observations.")
     else:
-        st.dataframe(notes[["Tag","Observation"]], height=300)
+        st.dataframe(notes[["Tag", "Observation"]], height=300)
