@@ -6,11 +6,10 @@ from zoneinfo import ZoneInfo
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import SpreadsheetNotFound, APIError
 
-# ── Page config & secrets ────────────────────────────────────
+# ── Configuración de página y credenciales ─────────────────────────
 st.set_page_config("🔑 Key Register Scanner", layout="centered")
 SPREADSHEET_ID = st.secrets["gcp_service_account"]["spreadsheet_id"]
 
-# ── Cached Google Sheets client ───────────────────────────────
 @st.cache_resource
 def gs_client():
     creds = Credentials.from_service_account_info(
@@ -22,99 +21,132 @@ def gs_client():
     )
     return gspread.authorize(creds)
 
-# ── Function to write back to the sheet ───────────────────────
-def update_key(tag, assignee, return_date_iso):
+# ── Funciones de negocio ───────────────────────────────────────────
+def update_key(tag: str, assignee: str, return_date: str) -> str:
     try:
         ws = gs_client().open_by_key(SPREADSHEET_ID).worksheet("Key Register")
     except (SpreadsheetNotFound, APIError) as e:
-        return f"Error opening sheet: {e}"
+        return f"Error abriendo hoja: {e}"
 
     headers = ws.row_values(2)
     if "Tag" not in headers or "Observation" not in headers:
-        return "Missing Tag/Observation columns"
+        return "Faltan columnas Tag/Observation"
     obs_col = headers.index("Observation") + 1
 
     records = ws.get_all_records(head=2)
     row = next(
         (i + 3 for i, r in enumerate(records)
-         if str(r.get("Tag", "")).strip() == tag),
-        None,
+         if str(r.get("Tag","")).strip() == tag),
+        None
     )
     if row is None:
-        return f"No key found for '{tag}'."
+        return f"Tag '{tag}' no encontrado."
 
     if assignee == "Returned":
         obs = ""
     else:
         ts = datetime.now(ZoneInfo("Australia/Brisbane")) \
-                .replace(microsecond=0) \
-                .isoformat(sep=" ")
+                 .replace(microsecond=0).isoformat(sep=" ")
         obs = f"{assignee} @ {ts}"
-        if return_date_iso:
-            obs += f" • Return: {return_date_iso}"
+        if return_date:
+            obs += f" • Return: {return_date}"
 
     try:
         ws.update_cell(row, obs_col, obs)
-        return f"✅ Record updated on row {row}."
+        return f"✅ Registro actualizado en fila {row}."
     except Exception as e:
-        return f"Error writing to sheet: {e}"
+        return f"Error escribiendo en hoja: {e}"
 
-# ── UI ─────────────────────────────────────────────────────────
-st.title("🔑 Key Register Scanner")
-st.write("Scan or type your tag code, choose who has it, and click Update Record.")
+def clear_observation(tag: str) -> str:
+    try:
+        ws = gs_client().open_by_key(SPREADSHEET_ID).worksheet("Key Register")
+    except (SpreadsheetNotFound, APIError) as e:
+        return f"Error abriendo hoja: {e}"
 
-# 1) Tag input
-tag = st.text_input("Tag code (e.g. M001)", key="tag_input")
+    headers = ws.row_values(2)
+    obs_col = headers.index("Observation") + 1
+    records = ws.get_all_records(head=2)
+    row = next(
+        (i + 3 for i, r in enumerate(records)
+         if str(r.get("Tag","")).strip() == tag),
+        None
+    )
+    if row is None:
+        return f"Tag '{tag}' no encontrado."
 
-# 2) Assignee
-options = [
-    "Returned","Owner","Guest","Contractor",
-    "ALLIAHN","CAMILO","CATALINA","GONZALO",
-    "JHONNY","LUIS","POL","STELLA"
-]
-assignee = st.selectbox("Assign to:", options, key="assignee_input")
+    try:
+        ws.update_cell(row, obs_col, "")
+        return f"✅ Observation borrada para '{tag}' (fila {row})."
+    except Exception as e:
+        return f"Error escribiendo en hoja: {e}"
 
-# 3) Dynamic fields appear immediately on change
-return_date_iso = ""
-if assignee in ("Owner", "Guest"):
-    return_date_iso = st.date_input("Return date", key="return_date_input").isoformat()
-
-contractor_name = ""
-if assignee == "Contractor":
-    contractor_name = st.text_input("Contractor name", key="contractor_input").strip()
-
-# 4) Update button
-if st.button("Update Record"):
-    if not tag.strip():
-        st.error("Please scan a valid tag first.")
+# ── Callback End-of-Day ────────────────────────────────────────────
+def eod_clear_callback():
+    tag = st.session_state["eod_tag"].strip()
+    if not tag:
+        st.session_state["eod_msg"] = ("error", "Escanea un tag válido.")
     else:
-        final_assignee = (
-            contractor_name or "Contractor"
-            if assignee == "Contractor"
-            else assignee
-        )
-        msg = update_key(tag.strip(), final_assignee, return_date_iso)
-        if msg.startswith("✅"):
-            st.success(msg)
-            # clear inputs
-            st.session_state["tag_input"] = ""
-            st.session_state["assignee_input"] = "Returned"
-            if "return_date_input" in st.session_state:
-                st.session_state["return_date_input"] = None
-            if "contractor_input" in st.session_state:
-                st.session_state["contractor_input"] = ""
-            # rerun to reset UI
-            st.experimental_rerun()
-        else:
-            st.error(msg)
+        msg = clear_observation(tag)
+        st.session_state["eod_msg"] = ("success", msg) if msg.startswith("✅") else ("error", msg)
+    st.session_state["eod_tag"] = ""
 
-# ── End-of-Day Notes ───────────────────────────────────────────
+# ── Interfaz de usuario ────────────────────────────────────────────
+st.title("🔑 Key Register Scanner")
+
+# **1) Selector de modo**
+mode = st.radio("Selecciona el modo:", ["Normal", "End-of-Day Auto-Clear"])
+
+if mode == "Normal":
+    st.write("Modo Normal: escanea, asigna quién, opcional return date, luego Actualizar.")
+    tag = st.text_input("Tag code (p.ej. M001)", key="tag_input")
+    assignee = st.selectbox(
+        "Assign to:",
+        ["Returned", "Owner", "Guest", "Contractor",
+         "ALLIAHN","CAMILO","CATALINA","GONZALO",
+         "JHONNY","LUIS","POL","STELLA"],
+        key="assignee_input"
+    )
+    return_date = ""
+    if assignee in ("Owner","Guest"):
+        return_date = st.date_input("Return date", key="return_date_input").isoformat()
+    contractor_name = ""
+    if assignee == "Contractor":
+        contractor_name = st.text_input("Contractor name", key="contractor_input").strip()
+    if st.button("Update Record"):
+        if not tag.strip():
+            st.error("Escanea un tag válido primero.")
+        else:
+            final = (contractor_name or "Contractor") if assignee=="Contractor" else assignee
+            msg = update_key(tag.strip(), final, return_date)
+            if msg.startswith("✅"):
+                st.success(msg)
+                # Limpieza y rerun
+                st.session_state["tag_input"] = ""
+                st.session_state["assignee_input"] = "Returned"
+                if "return_date_input" in st.session_state: st.session_state["return_date_input"] = None
+                if "contractor_input"   in st.session_state: st.session_state["contractor_input"]   = ""
+                st.experimental_rerun()
+            else:
+                st.error(msg)
+
+else:  # End-of-Day
+    st.write("Modo End-of-Day: escanea y se borra la nota automáticamente.")
+    st.text_input(
+        "Escanea Tag para borrar nota:",
+        key="eod_tag",
+        on_change=eod_clear_callback
+    )
+    if "eod_msg" in st.session_state:
+        status, text = st.session_state["eod_msg"]
+        (st.success if status=="success" else st.error)(text)
+
+# ── Notas del día ────────────────────────────────────────────────
 st.markdown("---")
-if st.button("🔍 Show End-of-Day Notes"):
+if st.button("🔍 Mostrar Notas del Día"):
     ws = gs_client().open_by_key(SPREADSHEET_ID).worksheet("Key Register")
     df = pd.DataFrame(ws.get_all_records(head=2))
     notes = df[df["Observation"].astype(str).str.strip() != ""]
     if notes.empty:
-        st.info("No keys currently with observations.")
+        st.info("No hay notas pendientes.")
     else:
-        st.dataframe(notes[["Tag", "Observation"]], height=300)
+        st.dataframe(notes[["Tag","Observation"]], height=300)
