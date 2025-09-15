@@ -58,15 +58,13 @@ def _open_ws():
         raise RuntimeError(
             f"Faltan columnas: {', '.join(missing)}. Encabezados actuales: {headers}"
         )
-    # Mapa de header -> índice 1-based
-    idx = {h: headers.index(h) + 1 for h in headers}
+    idx = {h: headers.index(h) + 1 for h in headers}  # header -> índice 1-based
     return ws, idx
 
 def _find_row_by_tag(ws, tag: str, tag_col_idx: int):
     """Busca la fila (1-based) del Tag; datos arrancan en fila 3."""
     tag_col = _with_retry(ws.col_values, tag_col_idx)  # Incluye filas 1..n
-    # Headers en fila 2 → datos desde fila 3
-    for i, v in enumerate(tag_col[2:], start=3):
+    for i, v in enumerate(tag_col[2:], start=3):  # salta filas 1 y 2 (título/headers)
         if str(v).strip().upper() == tag:
             return i
     return None
@@ -130,8 +128,7 @@ def eod_clear_callback():
     else:
         msg = clear_observation(tag)
         st.session_state["eod_msg"] = ("success", msg) if msg.startswith("✅") else ("error", msg)
-    # Limpia campo para siguiente escaneo
-    st.session_state["eod_tag"] = ""
+    st.session_state["eod_tag"] = ""  # limpia campo
 
 # ── Interfaz de usuario ────────────────────────────────────────────
 st.title("🔑 Key Register Scanner")
@@ -139,13 +136,24 @@ st.title("🔑 Key Register Scanner")
 # 1) Selector de modo
 mode = st.radio("Selecciona el modo:", ["Normal", "End-of-Day Auto-Clear"], horizontal=True)
 
+# Autofocus helper (para que el cursor vuelva al Tag)
+def autofocus_tag():
+    st.components.v1.html(
+        """
+        <script>
+        const i = parent.document.querySelector('input[aria-label="Tag code (p.ej. M001)"]');
+        if (i) { i.focus(); i.select && i.select(); }
+        </script>
+        """,
+        height=0,
+    )
+
 if mode == "Normal":
     st.write("Modo Normal: escanea, asigna quién, opcional return date, luego **Actualizar**.")
 
     # No limpiamos automáticamente: solo se limpiará el Tag tras éxito
     with st.form("normal_form", clear_on_submit=False):
         tag = st.text_input("Tag code (p.ej. M001)", key="tag_input")
-
         assignee = st.selectbox(
             "Assign to:",
             ["Returned", "Owner", "Guest", "Contractor",
@@ -153,10 +161,8 @@ if mode == "Normal":
              "JHONNY","LUIS","POL","STELLA"],
             key="assignee_input"
         )
-
         return_date = ""
         if assignee in ("Owner","Guest"):
-            # date_input retorna date; isoformat() → YYYY-MM-DD
             return_date = st.date_input("Return date", key="return_date_input").isoformat()
 
         contractor_name = ""
@@ -179,11 +185,16 @@ if mode == "Normal":
                     st.toast("Registro actualizado")
                 except Exception:
                     pass
-                # 👇 Reinicia SOLO el Tag. No tocamos assignee, return_date ni contractor_name.
-                st.session_state["tag_input"] = ""
+                # 🔥 Limpieza fiable del Tag:
+                # 1) Elimina del session_state para romper el valor anterior
+                # 2) Rerun para que el widget reaparezca vacío
+                st.session_state.pop("tag_input", None)
                 st.rerun()
             else:
                 st.error(msg)
+
+    # Siempre intenta enfocar el input (útil tras el rerun)
+    autofocus_tag()
 
 else:
     st.write("Modo End-of-Day: escanea y se borra la nota automáticamente.")
@@ -202,16 +213,12 @@ st.markdown("---")
 if st.button("🔍 Mostrar Notas del Día"):
     try:
         ws, idx = _open_ws()
-
-        # Traer solo columnas necesarias (Tag y Observation) usando col_values
         tag_vals = _with_retry(ws.col_values, idx["Tag"])
         obs_vals = _with_retry(ws.col_values, idx["Observation"])
 
-        # Quitar filas de encabezado (1 y 2). Datos arrancan en 3.
         tag_vals_data = tag_vals[2:] if len(tag_vals) > 2 else []
         obs_vals_data = obs_vals[2:] if len(obs_vals) > 2 else []
 
-        # Alinear longitudes
         max_len = max(len(tag_vals_data), len(obs_vals_data))
         tag_vals_data += [""] * (max_len - len(tag_vals_data))
         obs_vals_data += [""] * (max_len - len(obs_vals_data))
@@ -222,7 +229,6 @@ if st.button("🔍 Mostrar Notas del Día"):
         if not notes:
             st.info("No hay notas pendientes.")
         else:
-            # Ordenar por timestamp si está en el texto como " @ YYYY-MM-DD HH:MM:SS"
             def _extract_ts(obs_text: str):
                 try:
                     if " @ " in obs_text:
@@ -230,7 +236,6 @@ if st.button("🔍 Mostrar Notas del Día"):
                         return datetime.fromisoformat(part)
                 except Exception:
                     pass
-                # Fallback: ordenar al final
                 return datetime.min
 
             notes_sorted = sorted(notes, key=lambda r: _extract_ts(str(r["Observation"])), reverse=True)
