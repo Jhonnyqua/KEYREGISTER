@@ -44,7 +44,6 @@ def _with_retry(fn, *args, **kwargs):
                 continue
             raise
         except Exception:
-            # Errores de red intermitentes pueden intentar reintento 1 vez
             if i < max_attempts - 1:
                 time.sleep((2 ** i) * base_sleep)
                 continue
@@ -59,15 +58,13 @@ def _open_ws():
         raise RuntimeError(
             f"Faltan columnas: {', '.join(missing)}. Encabezados actuales: {headers}"
         )
-    # Mapa de header -> índice 1-based
-    idx = {h: headers.index(h) + 1 for h in headers}
+    idx = {h: headers.index(h) + 1 for h in headers}  # header -> índice 1-based
     return ws, idx
 
 def _find_row_by_tag(ws, tag: str, tag_col_idx: int):
     """Busca la fila (1-based) del Tag; datos arrancan en fila 3."""
     tag_col = _with_retry(ws.col_values, tag_col_idx)  # Incluye filas 1..n
-    # Headers en fila 2 → datos desde fila 3
-    for i, v in enumerate(tag_col[2:], start=3):
+    for i, v in enumerate(tag_col[2:], start=3):  # salta filas 1 y 2 (título/headers)
         if str(v).strip().upper() == tag:
             return i
     return None
@@ -81,7 +78,7 @@ def update_key(tag: str, assignee: str, return_date: str) -> str:
     """
     try:
         ws, idx = _open_ws()
-    except (SpreadsheetNotFound, APIError) as e:
+    except (SpreadsheetNotFound, APIError):
         return "❌ No se pudo abrir la hoja. Verifica permisos/ID."
     except Exception as e:
         return f"❌ No se pudo abrir la hoja: {e}"
@@ -109,7 +106,7 @@ def clear_observation(tag: str) -> str:
     """Borra Observation para un Tag dado."""
     try:
         ws, idx = _open_ws()
-    except (SpreadsheetNotFound, APIError) as e:
+    except (SpreadsheetNotFound, APIError):
         return "❌ No se pudo abrir la hoja. Verifica permisos/ID."
     except Exception as e:
         return f"❌ No se pudo abrir la hoja: {e}"
@@ -131,8 +128,7 @@ def eod_clear_callback():
     else:
         msg = clear_observation(tag)
         st.session_state["eod_msg"] = ("success", msg) if msg.startswith("✅") else ("error", msg)
-    # Limpia campo para siguiente escaneo
-    st.session_state["eod_tag"] = ""
+    st.session_state["eod_tag"] = ""  # limpia campo
 
 # ── Interfaz de usuario ────────────────────────────────────────────
 st.title("🔑 Key Register Scanner")
@@ -143,9 +139,9 @@ mode = st.radio("Selecciona el modo:", ["Normal", "End-of-Day Auto-Clear"], hori
 if mode == "Normal":
     st.write("Modo Normal: escanea, asigna quién, opcional return date, luego **Actualizar**.")
 
-    with st.form("normal_form", clear_on_submit=False):
+    # ⬇️ Cambiado a clear_on_submit=True para auto-limpiar el form
+    with st.form("normal_form", clear_on_submit=True):
         tag = st.text_input("Tag code (p.ej. M001)", key="tag_input")
-
         assignee = st.selectbox(
             "Assign to:",
             ["Returned", "Owner", "Guest", "Contractor",
@@ -156,7 +152,6 @@ if mode == "Normal":
 
         return_date = ""
         if assignee in ("Owner","Guest"):
-            # date_input retorna date; isoformat() → YYYY-MM-DD
             return_date = st.date_input("Return date", key="return_date_input").isoformat()
 
         contractor_name = ""
@@ -179,9 +174,10 @@ if mode == "Normal":
                     st.toast("Registro actualizado")
                 except Exception:
                     pass
-                # Limpieza de estado y rerun
-                st.session_state["tag_input"] = ""
+                # ⬇️ Reset explícito del estado + rerun para garantizar limpieza total
                 st.session_state["assignee_input"] = "Returned"
+                if "tag_input" in st.session_state:
+                    st.session_state["tag_input"] = ""
                 if "return_date_input" in st.session_state:
                     st.session_state.pop("return_date_input")
                 if "contractor_input" in st.session_state:
@@ -207,16 +203,12 @@ st.markdown("---")
 if st.button("🔍 Mostrar Notas del Día"):
     try:
         ws, idx = _open_ws()
-
-        # Traer solo columnas necesarias (Tag y Observation) usando col_values
         tag_vals = _with_retry(ws.col_values, idx["Tag"])
         obs_vals = _with_retry(ws.col_values, idx["Observation"])
 
-        # Quitar filas de encabezado (1 y 2). Datos arrancan en 3.
         tag_vals_data = tag_vals[2:] if len(tag_vals) > 2 else []
         obs_vals_data = obs_vals[2:] if len(obs_vals) > 2 else []
 
-        # Alinear longitudes
         max_len = max(len(tag_vals_data), len(obs_vals_data))
         tag_vals_data += [""] * (max_len - len(tag_vals_data))
         obs_vals_data += [""] * (max_len - len(obs_vals_data))
@@ -227,16 +219,13 @@ if st.button("🔍 Mostrar Notas del Día"):
         if not notes:
             st.info("No hay notas pendientes.")
         else:
-            # Ordenar por timestamp si está en el texto como " @ YYYY-MM-DD HH:MM:SS"
             def _extract_ts(obs_text: str):
                 try:
-                    # Buscar el segmento después de " @ "
                     if " @ " in obs_text:
                         part = obs_text.split(" @ ", 1)[1].split("•", 1)[0].strip()
                         return datetime.fromisoformat(part)
                 except Exception:
                     pass
-                # Fallback: ordenar al final
                 return datetime.min
 
             notes_sorted = sorted(notes, key=lambda r: _extract_ts(str(r["Observation"])), reverse=True)
