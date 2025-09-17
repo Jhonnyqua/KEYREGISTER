@@ -9,7 +9,7 @@ from gspread.exceptions import SpreadsheetNotFound, APIError
 # ── Configuración de página y credenciales ─────────────────────────
 st.set_page_config("🔑 Key Register Scanner", layout="centered")
 
-# Lee el ID desde secrets → debe estar en [gcp_service_account].spreadsheet_id
+# Debe existir en st.secrets["gcp_service_account"] el campo spreadsheet_id
 SPREADSHEET_ID = st.secrets["gcp_service_account"]["spreadsheet_id"]
 
 @st.cache_resource
@@ -52,8 +52,7 @@ def update_key(tag: str, assignee: str, return_date: str) -> str:
     if assignee == "Returned":
         obs = ""
     else:
-        ts = datetime.now(ZoneInfo("Australia/Brisbane")) \
-               .replace(microsecond=0).isoformat(sep=" ")
+        ts = datetime.now(ZoneInfo("Australia/Brisbane")).replace(microsecond=0).isoformat(sep=" ")
         obs = f"{assignee} @ {ts}"
         if return_date:
             obs += f" • Return: {return_date}"
@@ -92,29 +91,76 @@ def clear_observation(tag: str) -> str:
     except Exception as e:
         return f"Error escribiendo en hoja: {e}"
 
-# ── Callback End-of-Day ────────────────────────────────────────────
-def eod_clear_callback():
-    """Borra la nota al escanear en modo End-of-Day y limpia el input."""
-    tag = st.session_state.get("eod_tag", "").strip()
-    if not tag:
-        st.session_state["eod_msg"] = ("error", "Escanea un tag válido.")
+# ── Flash message persistente tras rerun ───────────────────────────
+def show_flash():
+    flash = st.session_state.pop("flash", None)
+    if not flash:
+        return
+    level, text = flash
+    if level == "success":
+        st.success(text)
+    elif level == "error":
+        st.error(text)
     else:
-        msg = clear_observation(tag)
-        st.session_state["eod_msg"] = ("success", msg) if msg.startswith("✅") else ("error", msg)
-    st.session_state["eod_tag"] = ""
+        st.info(text)
 
-# ── Interfaz de usuario ────────────────────────────────────────────
+# ── Callback de “scan-to-commit” ───────────────────────────────────
+def scan_commit():
+    """
+    Se dispara cuando el usuario (o escáner) presiona Enter en el campo Tag.
+    Lee el estado actual de Assign to, Return date y Contractor name,
+    actualiza, muestra mensaje y limpia SOLO el Tag.
+    """
+    tag = st.session_state.get("tag_input", "").strip()
+    assignee = st.session_state.get("assignee_input", "Returned")
+    return_date = ""
+    if assignee in ("Owner", "Guest"):
+        # date_input guarda date en session_state; si no existe, queda None
+        d = st.session_state.get("return_date_input", None)
+        if d:
+            return_date = d.isoformat()
+
+    contractor_name = st.session_state.get("contractor_input", "").strip()
+
+    if not tag:
+        st.session_state["flash"] = ("error", "Escanea un tag válido primero.")
+        return
+
+    if assignee == "Contractor" and not contractor_name:
+        st.session_state["flash"] = ("error", "Ingresa el nombre del contratista.")
+        # NO limpiamos el tag para que puedas corregir de una
+        return
+
+    final_assignee = (contractor_name or "Contractor") if assignee == "Contractor" else assignee
+
+    msg = update_key(tag, final_assignee, return_date)
+    if msg.startswith("✅"):
+        st.session_state["flash"] = ("success", msg)
+        # Limpia SOLO Tag y rerun para volver a enfocar y seguir escaneando
+        st.session_state.pop("tag_input", None)
+    else:
+        st.session_state["flash"] = ("error", msg)
+    st.rerun()
+
+# ── UI ─────────────────────────────────────────────────────────────
 st.title("🔑 Key Register Scanner")
+show_flash()
 
-# 1) Selector de modo
-mode = st.radio("Selecciona el modo:", ["Normal", "End-of-Day Auto-Clear"])
+mode = st.radio("Selecciona el modo:", ["Normal", "End-of-Day Auto-Clear"], horizontal=True)
 
 if mode == "Normal":
-    st.write("Modo Normal: escanea, asigna quién, opcional return date, luego **Actualizar**.")
+    st.write("Modo Normal: **escanea y presiona Enter** para actualizar. También puedes usar el botón.")
 
-    # Campos
-    tag = st.text_input("Tag code (p.ej. M001)", key="tag_input")
-    assignee = st.selectbox(
+    # Tag con on_change → modo scan-to-commit
+    st.text_input(
+        "Tag code (p.ej. M001)",
+        key="tag_input",
+        on_change=scan_commit,   # ⬅️ Aquí está la magia
+        placeholder="Escanea aquí y presiona Enter",
+    )
+
+    # Assign to (se mantiene para procesar varias llaves seguidas)
+    st.selectbox(
         "Assign to:",
         ["Returned", "Owner", "Guest", "Contractor",
          "ALLIAHN","CAMILO","CATALINA","GONZALO",
@@ -122,51 +168,38 @@ if mode == "Normal":
         key="assignee_input"
     )
 
-    return_date = ""
-    if assignee in ("Owner", "Guest"):
-        return_date = st.date_input("Return date", key="return_date_input").isoformat()
+    # Campos condicionales (aparecen en vivo)
+    if st.session_state.get("assignee_input") in ("Owner", "Guest"):
+        st.date_input("Return date", key="return_date_input")
 
-    contractor_name = ""
-    if assignee == "Contractor":
-        contractor_name = st.text_input("Contractor name", key="contractor_input").strip()
+    if st.session_state.get("assignee_input") == "Contractor":
+        st.text_input("Contractor name", key="contractor_input")
 
-    # Acción
-    if st.button("Update Record"):
-        if not tag.strip():
-            st.error("Escanea un tag válido primero.")
-        elif assignee == "Contractor" and not contractor_name:
-            st.error("Ingresa el nombre del contratista.")
-        else:
-            final = (contractor_name or "Contractor") if assignee == "Contractor" else assignee
-            msg = update_key(tag.strip(), final, return_date)
-            if msg.startswith("✅"):
-                st.success(msg)
-
-                # 🔹 Limpia SOLO el Tag y deja el Assign to como está
-                st.session_state["tag_input"] = ""
-
-                # Si quieres limpieza total, descomenta:
-                # st.session_state["assignee_input"] = "Returned"
-                # st.session_state.pop("return_date_input", None)
-                # st.session_state["contractor_input"] = ""
-
-                # Re-render para dejar el cursor en Tag y seguir escaneando
-                st.rerun()
-            else:
-                st.error(msg)
+    # Botón de respaldo (opcional) por si no usas Enter
+    if st.button("Update Record", type="primary"):
+        scan_commit()
 
 else:
     st.write("Modo End-of-Day: escanea y se borra la nota automáticamente.")
     st.text_input(
         "Escanea Tag para borrar nota:",
         key="eod_tag",
-        on_change=eod_clear_callback
+        on_change=lambda: (
+            st.session_state.update(
+                {"eod_msg": (("success", clear_observation(st.session_state.get("eod_tag", "").strip()))
+                             if st.session_state.get("eod_tag", "").strip()
+                             else ("error", "Escanea un tag válido."))}
+            ),
+            st.session_state.update({"eod_tag": ""}),
+            st.rerun()
+        ),
+        placeholder="Ej: M001"
     )
     if "eod_msg" in st.session_state:
         status, text = st.session_state["eod_msg"]
         (st.success if status == "success" else st.error)(text)
 
-# 2) Notas del día
+# Notas del día
 st.markdown("---")
 if st.button("🔍 Mostrar Notas del Día"):
     try:
@@ -180,7 +213,7 @@ if st.button("🔍 Mostrar Notas del Día"):
     except Exception as e:
         st.error(f"No se pudieron cargar las notas: {e}")
 
-# 🔸 Autofocus al campo de Tag para facilitar escaneo continuo
+# Autofocus para que siempre puedas escanear de una
 st.components.v1.html(
     """
     <script>
