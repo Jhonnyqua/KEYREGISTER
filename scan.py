@@ -23,7 +23,7 @@ st.set_page_config("🔑 Key Register Scanner", layout="centered")
 # -----------------------------------------------------------------------------
 # Si MAINTENANCE es True, la app mostrará un aviso con animación y se detendrá.
 # Para reabrir el uso normal, pon MAINTENANCE = False.
-MAINTENANCE = False
+MAINTENANCE = True
 
 if MAINTENANCE:
     # Bloque visual con animación CSS sencilla (sin dependencias extra).
