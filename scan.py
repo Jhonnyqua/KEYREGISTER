@@ -6,7 +6,7 @@ import time
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from google.oauth2.service_account import Credentials
-from gspread.exceptions import SpreadsheetNotFound, APIError, WorksheetNotFound
+from gspread.exceptions import APIError, WorksheetNotFound
 
 # ── Configuración ─────────────────────────────────────────────────
 st.set_page_config("🔑 Key Register Scanner", layout="centered")
@@ -17,17 +17,17 @@ TZ = ZoneInfo("Australia/Brisbane")
 SHEET_REGISTER = "Key Register"
 SHEET_LOG = "Key Log"  # se crea automáticamente si no existe
 
-HEADER_ROW = 2         # headers están en fila 2
-DATA_START_ROW = 3     # data empieza en fila 3
+HEADER_ROW = 2
+DATA_START_ROW = 3
 
 TAG_COL_NAME = "Tag"
 OBS_COL_NAME = "Observation"
 
-# Ajusta esto a tu formato real (ej: M001, G001, etc.)
+# Ajusta a tu formato real si hace falta (ej: M001 / G001 / M0001)
 TAG_REGEX = re.compile(r"^[A-Z]\d{3,4}$")
 
-# Anti doble-scan (segundos)
 DEBOUNCE_SECONDS = 1.2
+
 
 # ── Cliente Google Sheets ─────────────────────────────────────────
 @st.cache_resource
@@ -41,8 +41,10 @@ def gs_client():
     )
     return gspread.authorize(creds)
 
+
 def open_ws(sheet_name: str):
     return gs_client().open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
+
 
 def get_or_create_ws(sheet_name: str, rows=2000, cols=20):
     sh = gs_client().open_by_key(SPREADSHEET_ID)
@@ -51,15 +53,19 @@ def get_or_create_ws(sheet_name: str, rows=2000, cols=20):
     except WorksheetNotFound:
         return sh.add_worksheet(title=sheet_name, rows=str(rows), cols=str(cols))
 
+
 # ── Utilidades ────────────────────────────────────────────────────
 def now_ts() -> str:
     return datetime.now(TZ).replace(microsecond=0).isoformat(sep=" ")
 
+
 def normalize_tag(tag: str) -> str:
     return (tag or "").strip().upper()
 
+
 def is_valid_tag(tag: str) -> bool:
     return bool(TAG_REGEX.match(tag))
+
 
 def with_retries(fn, retries=3, base_sleep=0.6):
     last = None
@@ -72,8 +78,9 @@ def with_retries(fn, retries=3, base_sleep=0.6):
     if last:
         raise last
 
+
 # ── Índice cacheado Tag -> fila ───────────────────────────────────
-@st.cache_data(ttl=300)  # 5 min
+@st.cache_data(ttl=300)  # 5 minutos
 def build_tag_index() -> dict:
     ws = open_ws(SHEET_REGISTER)
     headers = ws.row_values(HEADER_ROW)
@@ -82,13 +89,12 @@ def build_tag_index() -> dict:
 
     tag_col = headers.index(TAG_COL_NAME) + 1
 
-    # Rango de la columna Tag (de fila 3 al final)
     last_row = ws.row_count
     start_a1 = gspread.utils.rowcol_to_a1(DATA_START_ROW, tag_col)
     end_a1 = gspread.utils.rowcol_to_a1(last_row, tag_col)
     rng = f"{start_a1}:{end_a1}"
 
-    col_vals = ws.get(rng)  # lista de filas, cada una con 1 celda
+    col_vals = ws.get(rng)
 
     idx = {}
     for i, row in enumerate(col_vals):
@@ -97,8 +103,10 @@ def build_tag_index() -> dict:
             idx[t] = DATA_START_ROW + i
     return idx
 
+
 def refresh_index():
     build_tag_index.clear()
+
 
 # ── Log (append-only) ─────────────────────────────────────────────
 def ensure_log_header(ws_log):
@@ -106,6 +114,7 @@ def ensure_log_header(ws_log):
     existing = ws_log.row_values(1)
     if not any(existing):
         ws_log.update("A1", [desired])
+
 
 def append_log(mode: str, action: str, tag: str, assignee: str, return_date: str, ok: bool, message: str):
     def _do():
@@ -115,13 +124,14 @@ def append_log(mode: str, action: str, tag: str, assignee: str, return_date: str
             [now_ts(), mode, action, tag, assignee or "", return_date or "", "OK" if ok else "ERROR", message],
             value_input_option="USER_ENTERED",
         )
+
     try:
         with_retries(_do, retries=3)
     except Exception:
-        # Si el log falla, no rompemos el flujo
         pass
 
-# ── Helpers de columnas ───────────────────────────────────────────
+
+# ── Helpers columnas ──────────────────────────────────────────────
 def get_headers_and_cols(ws):
     headers = ws.row_values(HEADER_ROW)
     if TAG_COL_NAME not in headers or OBS_COL_NAME not in headers:
@@ -129,6 +139,7 @@ def get_headers_and_cols(ws):
     tag_col = headers.index(TAG_COL_NAME) + 1
     obs_col = headers.index(OBS_COL_NAME) + 1
     return headers, tag_col, obs_col
+
 
 # ── Debounce anti doble-scan ──────────────────────────────────────
 def should_debounce(tag: str) -> bool:
@@ -141,6 +152,7 @@ def should_debounce(tag: str) -> bool:
     st.session_state["_last_scanned_tag"] = tag
     st.session_state["_last_scanned_time"] = now
     return False
+
 
 # ── Acciones principales ──────────────────────────────────────────
 def update_observation(tag: str, assignee: str, return_date: str, mode="Normal") -> str:
@@ -189,6 +201,7 @@ def update_observation(tag: str, assignee: str, return_date: str, mode="Normal")
         append_log(mode, "Assign", tag, assignee, return_date, False, msg)
         return msg
 
+
 def clear_observation(tag: str, mode="EOD") -> str:
     tag = normalize_tag(tag)
     if not tag:
@@ -228,6 +241,7 @@ def clear_observation(tag: str, mode="EOD") -> str:
         append_log(mode, "Clear", tag, "", "", False, msg)
         return msg
 
+
 # ── Callbacks ─────────────────────────────────────────────────────
 def eod_clear_callback():
     tag = normalize_tag(st.session_state.get("eod_tag", ""))
@@ -239,6 +253,7 @@ def eod_clear_callback():
         msg = clear_observation(tag, mode="EOD")
         st.session_state["eod_msg"] = ("success", msg) if msg.startswith("✅") else ("error", msg)
     st.session_state["eod_tag"] = ""
+
 
 def normal_auto_update_callback():
     tag = normalize_tag(st.session_state.get("tag_input", ""))
@@ -255,15 +270,15 @@ def normal_auto_update_callback():
     contractor_name = (st.session_state.get("contractor_input", "") or "").strip()
     return_date = st.session_state.get("return_date_str", "")
 
+    # ⭐ Cambio pedido: NO borrar el contractor_name para escanear muchas llaves seguidas
     final_assignee = (contractor_name or "Contractor") if assignee == "Contractor" else assignee
 
     msg = update_observation(tag, final_assignee, return_date, mode="Normal-Auto")
     st.session_state["normal_msg"] = ("success", msg) if msg.startswith("✅") else ("error", msg)
 
+    # ✅ Borra SOLO el tag
     st.session_state["tag_input"] = ""
 
-    if assignee == "Contractor":
-        st.session_state["contractor_input"] = ""
 
 # ── UI ────────────────────────────────────────────────────────────
 st.title("🔑 Key Register Scanner")
@@ -274,7 +289,7 @@ with colA:
         refresh_index()
         st.success("Índice refrescado.")
 with colB:
-    st.caption("Auto-update + índice cacheado + log + debounce")
+    st.caption("Auto-update + índice cacheado + log + debounce (contractor se mantiene)")
 
 mode = st.radio("Selecciona el modo:", ["Normal", "End-of-Day Auto-Clear"], horizontal=True)
 
@@ -303,7 +318,7 @@ if mode == "Normal":
         st.session_state["return_date_str"] = ""
 
     if assignee_now == "Contractor":
-        st.text_input("Contractor name", key="contractor_input")
+        st.text_input("Contractor name", key="contractor_input", help="Se mantiene para escaneos consecutivos.")
     else:
         st.session_state["contractor_input"] = ""
 
@@ -388,3 +403,4 @@ with col2:
                 st.dataframe(df_log, height=320, use_container_width=True)
         except Exception as e:
             st.error(f"No fue posible leer el log: {e}")
+
