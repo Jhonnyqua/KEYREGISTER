@@ -8,8 +8,12 @@ from gspread.exceptions import SpreadsheetNotFound, APIError
 
 # ── Configuración de página y credenciales ─────────────────────────
 st.set_page_config("🔑 Key Register Scanner", layout="centered")
+<<<<<<< HEAD
 SPREADSHEET_ID = st.secrets["gcp_service_account"]["spreadsheet_id"]
 
+=======
+SPREADSHEET_ID = st.secrets["gcp_service_account"]["spreadsheet_id"] # ID de la hoja de cálculo
+>>>>>>> 246272d (09022026)
 @st.cache_resource
 def gs_client():
     creds = Credentials.from_service_account_info(
