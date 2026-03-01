@@ -3,6 +3,7 @@ import gspread
 import pandas as pd
 import re
 import time
+import random
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from google.oauth2.service_account import Credentials
@@ -27,6 +28,9 @@ OBS_COL_NAME = "Observation"
 TAG_REGEX = re.compile(r"^[A-Z]\d{3,4}$")
 
 DEBOUNCE_SECONDS = 1.2
+
+# ✅ Parche A: throttle entre escrituras para evitar rate limit
+MIN_SECONDS_BETWEEN_WRITES = 0.45
 
 
 # ── Cliente Google Sheets ─────────────────────────────────────────
@@ -67,20 +71,37 @@ def is_valid_tag(tag: str) -> bool:
     return bool(TAG_REGEX.match(tag))
 
 
-def with_retries(fn, retries=3, base_sleep=0.6):
+# ✅ Parche A: reintentos con backoff para 429/503
+def with_retries(fn, retries=6, base_sleep=0.8):
     last = None
     for i in range(retries):
         try:
             return fn()
         except APIError as e:
             last = e
-            time.sleep(base_sleep * (i + 1))
+            msg = str(e)
+            # Rate limit / backend errors típicos
+            if any(k in msg for k in ["429", "RESOURCE_EXHAUSTED", "503", "Service Unavailable"]):
+                sleep = base_sleep * (2 ** i) + random.uniform(0, 0.4)
+                time.sleep(sleep)
+                continue
+            raise
     if last:
         raise last
 
 
+# ✅ Parche A: throttle global para no “disparar” requests
+def throttle_write():
+    last = st.session_state.get("_last_write_ts", 0.0)
+    now = time.time()
+    delta = now - last
+    if delta < MIN_SECONDS_BETWEEN_WRITES:
+        time.sleep(MIN_SECONDS_BETWEEN_WRITES - delta)
+    st.session_state["_last_write_ts"] = time.time()
+
+
 # ── Índice cacheado Tag -> fila ───────────────────────────────────
-@st.cache_data(ttl=300)  # 5 minutos
+@st.cache_data(ttl=1800)  # ✅ subido a 30 min para evitar recalcular en medio de escaneos
 def build_tag_index() -> dict:
     ws = open_ws(SHEET_REGISTER)
     headers = ws.row_values(HEADER_ROW)
@@ -106,6 +127,19 @@ def build_tag_index() -> dict:
 
 def refresh_index():
     build_tag_index.clear()
+    cached_cols.clear()
+
+
+# ✅ Parche A: headers cacheados (evita ws.row_values en cada scan)
+@st.cache_data(ttl=3600)  # 1 hora
+def cached_cols():
+    ws = open_ws(SHEET_REGISTER)
+    headers = ws.row_values(HEADER_ROW)
+    if TAG_COL_NAME not in headers or OBS_COL_NAME not in headers:
+        raise ValueError("Faltan columnas Tag/Observation.")
+    tag_col = headers.index(TAG_COL_NAME) + 1
+    obs_col = headers.index(OBS_COL_NAME) + 1
+    return tag_col, obs_col
 
 
 # ── Log (append-only) ─────────────────────────────────────────────
@@ -117,6 +151,10 @@ def ensure_log_header(ws_log):
 
 
 def append_log(mode: str, action: str, tag: str, assignee: str, return_date: str, ok: bool, message: str):
+    # ✅ Parche A: SOLO loguear errores para no quemar cuota
+    if ok:
+        return
+
     def _do():
         ws_log = get_or_create_ws(SHEET_LOG, rows=5000, cols=12)
         ensure_log_header(ws_log)
@@ -126,19 +164,9 @@ def append_log(mode: str, action: str, tag: str, assignee: str, return_date: str
         )
 
     try:
-        with_retries(_do, retries=3)
+        with_retries(_do, retries=3, base_sleep=0.8)
     except Exception:
         pass
-
-
-# ── Helpers columnas ──────────────────────────────────────────────
-def get_headers_and_cols(ws):
-    headers = ws.row_values(HEADER_ROW)
-    if TAG_COL_NAME not in headers or OBS_COL_NAME not in headers:
-        return None, None, None
-    tag_col = headers.index(TAG_COL_NAME) + 1
-    obs_col = headers.index(OBS_COL_NAME) + 1
-    return headers, tag_col, obs_col
 
 
 # ── Debounce anti doble-scan ──────────────────────────────────────
@@ -165,11 +193,12 @@ def update_observation(tag: str, assignee: str, return_date: str, mode="Normal")
         append_log(mode, "Assign", tag, assignee, return_date, False, "Invalid tag format")
         return f"Formato de tag inválido: '{tag}'."
 
-    ws = open_ws(SHEET_REGISTER)
-    _, _, obs_col = get_headers_and_cols(ws)
-    if obs_col is None:
-        append_log(mode, "Assign", tag, assignee, return_date, False, "Missing Tag/Observation columns")
-        return "Faltan columnas Tag/Observation en la hoja."
+    # ✅ usar cols cacheadas
+    try:
+        _, obs_col = cached_cols()
+    except Exception as e:
+        append_log(mode, "Assign", tag, assignee, return_date, False, f"Header error: {e}")
+        return f"Error leyendo headers: {e}"
 
     idx = build_tag_index()
     if "__error__" in idx:
@@ -189,10 +218,12 @@ def update_observation(tag: str, assignee: str, return_date: str, mode="Normal")
             obs += f" • Return: {return_date}"
 
     def _do():
+        ws = open_ws(SHEET_REGISTER)
+        throttle_write()  # ✅ throttle antes de escribir
         ws.update_cell(row, obs_col, obs)
 
     try:
-        with_retries(_do, retries=3)
+        with_retries(_do, retries=6, base_sleep=0.8)
         msg = f"✅ Actualizado: {tag} (fila {row})."
         append_log(mode, "Assign", tag, assignee, return_date, True, msg)
         return msg
@@ -212,11 +243,11 @@ def clear_observation(tag: str, mode="EOD") -> str:
         append_log(mode, "Clear", tag, "", "", False, "Invalid tag format")
         return f"Formato de tag inválido: '{tag}'."
 
-    ws = open_ws(SHEET_REGISTER)
-    _, _, obs_col = get_headers_and_cols(ws)
-    if obs_col is None:
-        append_log(mode, "Clear", tag, "", "", False, "Missing Tag/Observation columns")
-        return "Faltan columnas Tag/Observation en la hoja."
+    try:
+        _, obs_col = cached_cols()
+    except Exception as e:
+        append_log(mode, "Clear", tag, "", "", False, f"Header error: {e}")
+        return f"Error leyendo headers: {e}"
 
     idx = build_tag_index()
     if "__error__" in idx:
@@ -229,10 +260,12 @@ def clear_observation(tag: str, mode="EOD") -> str:
         return f"Tag '{tag}' no encontrado."
 
     def _do():
+        ws = open_ws(SHEET_REGISTER)
+        throttle_write()  # ✅ throttle antes de escribir
         ws.update_cell(row, obs_col, "")
 
     try:
-        with_retries(_do, retries=3)
+        with_retries(_do, retries=6, base_sleep=0.8)
         msg = f"✅ Observation borrada: {tag} (fila {row})."
         append_log(mode, "Clear", tag, "", "", True, msg)
         return msg
@@ -270,13 +303,12 @@ def normal_auto_update_callback():
     contractor_name = (st.session_state.get("contractor_input", "") or "").strip()
     return_date = st.session_state.get("return_date_str", "")
 
-    # ⭐ Cambio pedido: NO borrar el contractor_name para escanear muchas llaves seguidas
     final_assignee = (contractor_name or "Contractor") if assignee == "Contractor" else assignee
 
     msg = update_observation(tag, final_assignee, return_date, mode="Normal-Auto")
     st.session_state["normal_msg"] = ("success", msg) if msg.startswith("✅") else ("error", msg)
 
-    # ✅ Borra SOLO el tag
+    # ✅ borrar solo Tag (contractor se mantiene)
     st.session_state["tag_input"] = ""
 
 
@@ -287,9 +319,9 @@ colA, colB = st.columns([1, 1])
 with colA:
     if st.button("🔄 Refrescar índice"):
         refresh_index()
-        st.success("Índice refrescado.")
+        st.success("Índice + headers refrescados.")
 with colB:
-    st.caption("Auto-update + índice cacheado + log + debounce (contractor se mantiene)")
+    st.caption("Parche A: menos llamadas + throttle + backoff (contractor se mantiene)")
 
 mode = st.radio("Selecciona el modo:", ["Normal", "End-of-Day Auto-Clear"], horizontal=True)
 
@@ -368,39 +400,19 @@ else:
         status, text = st.session_state["eod_msg"]
         (st.success if status == "success" else st.error)(text)
 
-# ── Paneles ───────────────────────────────────────────────────────
+# ── Panel básico ──────────────────────────────────────────────────
 st.markdown("---")
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    if st.button("🔍 Mostrar Notas Pendientes"):
-        try:
-            ws = open_ws(SHEET_REGISTER)
-            df = pd.DataFrame(ws.get_all_records(head=HEADER_ROW))
-            if OBS_COL_NAME not in df.columns:
-                st.error(f"Falta columna '{OBS_COL_NAME}'.")
+if st.button("🔍 Mostrar Notas Pendientes"):
+    try:
+        ws = open_ws(SHEET_REGISTER)
+        df = pd.DataFrame(ws.get_all_records(head=HEADER_ROW))
+        if OBS_COL_NAME not in df.columns:
+            st.error(f"Falta columna '{OBS_COL_NAME}'.")
+        else:
+            notes = df[df[OBS_COL_NAME].astype(str).str.strip() != ""]
+            if notes.empty:
+                st.info("No hay notas pendientes.")
             else:
-                notes = df[df[OBS_COL_NAME].astype(str).str.strip() != ""]
-                if notes.empty:
-                    st.info("No hay notas pendientes.")
-                else:
-                    st.dataframe(notes[[TAG_COL_NAME, OBS_COL_NAME]], height=320, use_container_width=True)
-        except Exception as e:
-            st.error(f"No fue posible obtener las notas: {e}")
-
-with col2:
-    if st.button("🧾 Ver últimos 50 logs"):
-        try:
-            ws_log = get_or_create_ws(SHEET_LOG)
-            values = ws_log.get_all_values()
-            if len(values) <= 1:
-                st.info("El log está vacío.")
-            else:
-                header = values[0]
-                rows = values[1:]
-                tail = rows[-50:]
-                df_log = pd.DataFrame(tail, columns=header)
-                st.dataframe(df_log, height=320, use_container_width=True)
-        except Exception as e:
-            st.error(f"No fue posible leer el log: {e}")
-
+                st.dataframe(notes[[TAG_COL_NAME, OBS_COL_NAME]], height=320, use_container_width=True)
+    except Exception as e:
+        st.error(f"No fue posible obtener las notas: {e}")
