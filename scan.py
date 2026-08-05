@@ -4,7 +4,7 @@ import pandas as pd
 import re
 import time
 import random
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError, WorksheetNotFound
@@ -60,9 +60,7 @@ def get_or_create_ws(sheet_name: str, rows=2000, cols=20):
 
 # ── Utilidades ────────────────────────────────────────────────────
 def now_ts() -> str:
-    # Resta 7 horas al horario actual de la zona horaria configurada
-    adjusted_time = datetime.now(TZ) - timedelta(hours=7)
-    return adjusted_time.replace(microsecond=0).isoformat(sep=" ")
+    return datetime.now(TZ).replace(microsecond=0).isoformat(sep=" ")
 
 
 def normalize_tag(tag: str) -> str:
